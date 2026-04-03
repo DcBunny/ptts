@@ -1,10 +1,15 @@
+import 'dart:collection';
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:tiaosheng/core/storage/local_storage.dart';
 import 'package:tiaosheng/features/jump_session/view_model/jump_session_view_model.dart';
+import 'package:tiaosheng/features/parent_camera/data/jump_rope_pose_analyzer.dart';
+import 'package:tiaosheng/features/parent_camera/data/jump_rope_pose_models.dart';
+import 'package:tiaosheng/features/parent_camera/data/parent_camera_frame.dart';
 import 'package:tiaosheng/features/parent_camera/data/parent_camera_service.dart';
 import 'package:tiaosheng/features/parent_camera/data/session_video_overlay_processor.dart';
 import 'package:tiaosheng/features/parent_camera/data/session_video_overlay_timeline.dart';
@@ -141,6 +146,40 @@ void main() {
     expect(context.videoLibrarySaver.savedPaths, isEmpty);
     expect(history, isEmpty);
   });
+
+  test('分析帧后会同步最新人体轮廓，用于校验动作采集是否正常', () async {
+    final context = _TestContext.create(videoPath: '/tmp/parent_camera_d.mp4');
+    addTearDown(context.dispose);
+
+    await context.waitForCameraReady();
+    final viewModel = context.container.read(
+      parentCameraViewModelProvider.notifier,
+    );
+    context.analyzer.enqueueResult(
+      JumpRopePoseFrameResult(
+        timestampMs: 0,
+        analysisLatencyMs: 38,
+        poses: <JumpRopePose>[_buildDetectedPose()],
+      ),
+    );
+
+    await viewModel.startCountdownAndRecording();
+    context.device.emitFrame();
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+
+    final state = context.readState();
+    expect(state.isRecording, isTrue);
+    expect(state.analysisStatusKey, 'parentCameraAnalysisTracking');
+    expect(state.detectedPoses, hasLength(1));
+    expect(
+      state.detectedPoses.first.landmark(JumpRopeLandmarkType.leftShoulder),
+      isNotNull,
+    );
+    expect(
+      state.detectedPoses.first.landmark(JumpRopeLandmarkType.rightAnkle),
+      isNotNull,
+    );
+  });
 }
 
 class _TestContext {
@@ -148,6 +187,7 @@ class _TestContext {
     required this.container,
     required this.subscription,
     required this.device,
+    required this.analyzer,
     required this.overlayProcessor,
     required this.videoLibrarySaver,
   });
@@ -155,6 +195,7 @@ class _TestContext {
   final ProviderContainer container;
   final ProviderSubscription<ParentCameraState> subscription;
   final _FakeParentCameraDevice device;
+  final _FakeJumpRopePoseAnalyzer analyzer;
   final _FakeSessionVideoOverlayProcessor overlayProcessor;
   final _FakeVideoLibrarySaver videoLibrarySaver;
 
@@ -163,6 +204,7 @@ class _TestContext {
     SessionVideoOverlayException? overlayError,
   }) {
     final device = _FakeParentCameraDevice(videoPath: videoPath);
+    final analyzer = _FakeJumpRopePoseAnalyzer();
     final overlayProcessor = _FakeSessionVideoOverlayProcessor(
       outputPath: videoPath.replaceFirst('.mp4', '_overlay.mp4'),
       error: overlayError,
@@ -174,6 +216,7 @@ class _TestContext {
         parentCameraServiceProvider.overrideWithValue(
           _FakeParentCameraService(device),
         ),
+        jumpRopeCounterAnalyzerProvider.overrideWithValue(analyzer),
         sessionVideoOverlayProcessorProvider.overrideWithValue(
           overlayProcessor,
         ),
@@ -189,6 +232,7 @@ class _TestContext {
       container: container,
       subscription: subscription,
       device: device,
+      analyzer: analyzer,
       overlayProcessor: overlayProcessor,
       videoLibrarySaver: videoLibrarySaver,
     );
@@ -199,7 +243,7 @@ class _TestContext {
   }
 
   Future<void> waitForCameraReady() async {
-    while (readState().isInitializing) {
+    while (readState().isInitializing || readState().isAnalyzerInitializing) {
       await Future<void>.delayed(const Duration(milliseconds: 10));
     }
   }
@@ -242,6 +286,8 @@ class _FakeParentCameraDevice implements ParentCameraDevice {
   _FakeParentCameraDevice({required this.videoPath});
 
   final String videoPath;
+  ParentCameraFrameListener? _onFrameAvailable;
+  var _frameIndex = 0;
   var _isRecording = false;
   var startRecordingCalls = 0;
   var stopRecordingCalls = 0;
@@ -252,6 +298,9 @@ class _FakeParentCameraDevice implements ParentCameraDevice {
 
   @override
   bool get isRecording => _isRecording;
+
+  @override
+  int get sensorOrientation => 90;
 
   @override
   Size? get previewSize => const Size(720, 1280);
@@ -267,17 +316,83 @@ class _FakeParentCameraDevice implements ParentCameraDevice {
   }
 
   @override
-  Future<void> startRecording() async {
+  Future<void> startRecording({
+    ParentCameraFrameListener? onFrameAvailable,
+  }) async {
     startRecordingCalls += 1;
     _isRecording = true;
+    _onFrameAvailable = onFrameAvailable;
   }
 
   @override
   Future<String?> stopRecording() async {
     stopRecordingCalls += 1;
     _isRecording = false;
+    _onFrameAvailable = null;
     return videoPath;
   }
+
+  void emitFrame() {
+    final listener = _onFrameAvailable;
+    if (!_isRecording || listener == null) {
+      return;
+    }
+    _frameIndex += 1;
+    listener(
+      ParentCameraFrame(
+        width: 720,
+        height: 1280,
+        rotationDegrees: sensorOrientation,
+        timestampMs: DateTime.now().millisecondsSinceEpoch + _frameIndex,
+        format: 'bgra8888',
+        planes: <ParentCameraFramePlane>[
+          ParentCameraFramePlane(
+            bytes: Uint8List(0),
+            bytesPerRow: 0,
+            bytesPerPixel: 4,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FakeJumpRopePoseAnalyzer implements JumpRopePoseAnalyzer {
+  final Queue<JumpRopePoseFrameResult> _results =
+      Queue<JumpRopePoseFrameResult>();
+
+  void enqueueResult(JumpRopePoseFrameResult result) {
+    _results.add(result);
+  }
+
+  @override
+  Future<JumpRopePoseFrameResult> analyzeFrame(ParentCameraFrame frame) async {
+    if (_results.isEmpty) {
+      return JumpRopePoseFrameResult(
+        timestampMs: frame.timestampMs,
+        analysisLatencyMs: 32,
+        poses: const <JumpRopePose>[],
+      );
+    }
+    final next = _results.removeFirst();
+    return JumpRopePoseFrameResult(
+      timestampMs: frame.timestampMs,
+      analysisLatencyMs: next.analysisLatencyMs,
+      poses: next.poses,
+    );
+  }
+
+  @override
+  Future<void> dispose() async {}
+
+  @override
+  Future<void> initialize() async {}
+
+  @override
+  Future<void> startSession() async {}
+
+  @override
+  Future<void> stopSession() async {}
 }
 
 class _FakeVideoLibrarySaver implements VideoLibrarySaver {
@@ -310,4 +425,156 @@ class _FakeSessionVideoOverlayProcessor
     }
     return outputPath;
   }
+}
+
+JumpRopePose _buildDetectedPose() {
+  final landmarks = List<JumpRopePoseLandmark>.generate(
+    JumpRopeLandmarkType.values.length,
+    (_) => const JumpRopePoseLandmark(
+      x: 0.5,
+      y: 0.5,
+      z: 0,
+      visibility: 0.96,
+      presence: 0.96,
+    ),
+  );
+
+  landmarks[JumpRopeLandmarkType.nose.index] = const JumpRopePoseLandmark(
+    x: 0.5,
+    y: 0.2,
+    z: 0,
+    visibility: 0.98,
+    presence: 0.98,
+  );
+  landmarks[JumpRopeLandmarkType.leftEar.index] = const JumpRopePoseLandmark(
+    x: 0.44,
+    y: 0.2,
+    z: 0,
+    visibility: 0.95,
+    presence: 0.95,
+  );
+  landmarks[JumpRopeLandmarkType.rightEar.index] = const JumpRopePoseLandmark(
+    x: 0.56,
+    y: 0.2,
+    z: 0,
+    visibility: 0.95,
+    presence: 0.95,
+  );
+  landmarks[JumpRopeLandmarkType.leftShoulder.index] =
+      const JumpRopePoseLandmark(
+        x: 0.42,
+        y: 0.33,
+        z: 0,
+        visibility: 0.98,
+        presence: 0.98,
+      );
+  landmarks[JumpRopeLandmarkType.rightShoulder.index] =
+      const JumpRopePoseLandmark(
+        x: 0.58,
+        y: 0.33,
+        z: 0,
+        visibility: 0.98,
+        presence: 0.98,
+      );
+  landmarks[JumpRopeLandmarkType.leftElbow.index] = const JumpRopePoseLandmark(
+    x: 0.36,
+    y: 0.46,
+    z: 0,
+    visibility: 0.94,
+    presence: 0.94,
+  );
+  landmarks[JumpRopeLandmarkType.rightElbow.index] = const JumpRopePoseLandmark(
+    x: 0.64,
+    y: 0.46,
+    z: 0,
+    visibility: 0.94,
+    presence: 0.94,
+  );
+  landmarks[JumpRopeLandmarkType.leftWrist.index] = const JumpRopePoseLandmark(
+    x: 0.31,
+    y: 0.58,
+    z: 0,
+    visibility: 0.92,
+    presence: 0.92,
+  );
+  landmarks[JumpRopeLandmarkType.rightWrist.index] = const JumpRopePoseLandmark(
+    x: 0.69,
+    y: 0.58,
+    z: 0,
+    visibility: 0.92,
+    presence: 0.92,
+  );
+  landmarks[JumpRopeLandmarkType.leftHip.index] = const JumpRopePoseLandmark(
+    x: 0.46,
+    y: 0.58,
+    z: 0,
+    visibility: 0.98,
+    presence: 0.98,
+  );
+  landmarks[JumpRopeLandmarkType.rightHip.index] = const JumpRopePoseLandmark(
+    x: 0.54,
+    y: 0.58,
+    z: 0,
+    visibility: 0.98,
+    presence: 0.98,
+  );
+  landmarks[JumpRopeLandmarkType.leftKnee.index] = const JumpRopePoseLandmark(
+    x: 0.46,
+    y: 0.75,
+    z: 0,
+    visibility: 0.96,
+    presence: 0.96,
+  );
+  landmarks[JumpRopeLandmarkType.rightKnee.index] = const JumpRopePoseLandmark(
+    x: 0.54,
+    y: 0.75,
+    z: 0,
+    visibility: 0.96,
+    presence: 0.96,
+  );
+  landmarks[JumpRopeLandmarkType.leftAnkle.index] = const JumpRopePoseLandmark(
+    x: 0.47,
+    y: 0.92,
+    z: 0,
+    visibility: 0.97,
+    presence: 0.97,
+  );
+  landmarks[JumpRopeLandmarkType.rightAnkle.index] = const JumpRopePoseLandmark(
+    x: 0.53,
+    y: 0.92,
+    z: 0,
+    visibility: 0.97,
+    presence: 0.97,
+  );
+  landmarks[JumpRopeLandmarkType.leftHeel.index] = const JumpRopePoseLandmark(
+    x: 0.47,
+    y: 0.94,
+    z: 0,
+    visibility: 0.95,
+    presence: 0.95,
+  );
+  landmarks[JumpRopeLandmarkType.rightHeel.index] = const JumpRopePoseLandmark(
+    x: 0.53,
+    y: 0.94,
+    z: 0,
+    visibility: 0.95,
+    presence: 0.95,
+  );
+  landmarks[JumpRopeLandmarkType.leftFootIndex.index] =
+      const JumpRopePoseLandmark(
+        x: 0.49,
+        y: 0.97,
+        z: 0,
+        visibility: 0.9,
+        presence: 0.9,
+      );
+  landmarks[JumpRopeLandmarkType.rightFootIndex.index] =
+      const JumpRopePoseLandmark(
+        x: 0.55,
+        y: 0.97,
+        z: 0,
+        visibility: 0.9,
+        presence: 0.9,
+      );
+  return JumpRopePose(landmarks: landmarks);
 }

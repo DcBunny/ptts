@@ -6,6 +6,10 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:tiaosheng/core/i18n/app_i18n.dart';
 import 'package:tiaosheng/features/jump_session/data/jump_session_models.dart';
 import 'package:tiaosheng/features/jump_session/view_model/jump_session_view_model.dart';
+import 'package:tiaosheng/features/parent_camera/data/jump_rope_counter_engine.dart';
+import 'package:tiaosheng/features/parent_camera/data/jump_rope_pose_analyzer.dart';
+import 'package:tiaosheng/features/parent_camera/data/jump_rope_pose_models.dart';
+import 'package:tiaosheng/features/parent_camera/data/parent_camera_frame.dart';
 import 'package:tiaosheng/features/parent_camera/data/parent_camera_service.dart';
 import 'package:tiaosheng/features/parent_camera/data/session_video_overlay_processor.dart';
 import 'package:tiaosheng/features/parent_camera/data/session_video_overlay_timeline.dart';
@@ -25,6 +29,24 @@ final sessionVideoOverlayProcessorProvider =
       return NativeSessionVideoOverlayProcessor();
     });
 
+final jumpRopePoseAnalyzerConfigProvider = Provider<JumpRopePoseAnalyzerConfig>(
+  (ref) {
+    return const JumpRopePoseAnalyzerConfig();
+  },
+);
+
+final jumpRopeTemporalEnhancerProvider = Provider<JumpRopeTemporalEnhancer>((
+  ref,
+) {
+  return const NoopJumpRopeTemporalEnhancer();
+});
+
+final jumpRopeCounterAnalyzerProvider = Provider<JumpRopePoseAnalyzer>((ref) {
+  return NativeJumpRopePoseAnalyzer(
+    config: ref.watch(jumpRopePoseAnalyzerConfigProvider),
+  );
+});
+
 final parentCameraViewModelProvider =
     NotifierProvider.autoDispose<ParentCameraViewModel, ParentCameraState>(
       ParentCameraViewModel.new,
@@ -40,7 +62,19 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
   Timer? _recordTimer;
   DateTime? _captureStartedAt;
   DateTime? _sessionStartedAt;
+  JumpRopePoseAnalyzer? _poseAnalyzer;
+  JumpRopeCounterEngine? _jumpCounterEngine;
   final List<int> _jumpEventMillis = [];
+  ParentCameraFrame? _pendingAnalysisFrame;
+  int? _lastQueuedFrameTimestampMs;
+  var _isAnalyzingFrame = false;
+  var _hasAnalyzerError = false;
+
+  JumpRopeCounterEngine get _counterEngine {
+    return _jumpCounterEngine ??= JumpRopeCounterEngine(
+      temporalEnhancer: ref.read(jumpRopeTemporalEnhancerProvider),
+    );
+  }
 
   @override
   ParentCameraState build() {
@@ -53,17 +87,24 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
     ref.onDispose(() {
       _countdownToken++;
       _recordTimer?.cancel();
+      _pendingAnalysisFrame = null;
       unawaited(_disposeCameraResources());
+      unawaited(_disposeAnalyzer());
     });
 
     if (!_hasInitialized) {
       _hasInitialized = true;
-      Future<void>.microtask(initializeCamera);
+      Future<void>.microtask(_initializeRuntime);
     }
 
     return ParentCameraState.initial(
       recordDurationSeconds: recordDurationSeconds,
     );
+  }
+
+  Future<void> _initializeRuntime() async {
+    await initializeCamera();
+    await initializeAnalyzer();
   }
 
   Future<void> initializeCamera() async {
@@ -114,6 +155,60 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
     }
   }
 
+  Future<void> initializeAnalyzer() async {
+    if (_poseAnalyzer != null || _hasAnalyzerError) {
+      return;
+    }
+
+    state = state.copyWith(
+      isAnalyzerInitializing: true,
+      isAnalyzerReady: false,
+      analysisStatusKey: 'parentCameraAnalysisPreparing',
+      clearError: true,
+      clearErrorDetail: true,
+    );
+
+    final analyzer = ref.read(jumpRopeCounterAnalyzerProvider);
+    try {
+      await analyzer.initialize();
+      if (!ref.mounted) {
+        await analyzer.dispose();
+        return;
+      }
+
+      _poseAnalyzer = analyzer;
+      state = state.copyWith(
+        isAnalyzerInitializing: false,
+        isAnalyzerReady: true,
+        analysisStatusKey: 'parentCameraAnalysisSearching',
+        clearError: true,
+        clearErrorDetail: true,
+      );
+    } on JumpRopePoseAnalyzerException catch (error) {
+      _hasAnalyzerError = true;
+      if (!ref.mounted) {
+        return;
+      }
+      state = state.copyWith(
+        isAnalyzerInitializing: false,
+        isAnalyzerReady: false,
+        errorKey: error.errorKey,
+        errorDetail: error.detail,
+      );
+    } catch (_) {
+      _hasAnalyzerError = true;
+      if (!ref.mounted) {
+        return;
+      }
+      state = state.copyWith(
+        isAnalyzerInitializing: false,
+        isAnalyzerReady: false,
+        errorKey: 'jumpCounterInitFailed',
+        clearErrorDetail: true,
+      );
+    }
+  }
+
   Future<void> startCountdownAndRecording() async {
     final device = _device;
     if (!_canStartRecording(device)) {
@@ -137,6 +232,8 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
   bool _canStartRecording(ParentCameraDevice? device) {
     return device != null &&
         !state.isInitializing &&
+        state.isAnalyzerReady &&
+        !state.isAnalyzerInitializing &&
         !state.isCountdownActive &&
         !state.isRecording &&
         !state.isProcessingVideo &&
@@ -151,6 +248,7 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
       isProcessingVideo: false,
       isVideoSaved: false,
       isSavingVideo: false,
+      detectedPoses: const <JumpRopePose>[],
       clearFeedback: true,
       clearFeedbackDetail: true,
       clearError: true,
@@ -159,6 +257,10 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
     _captureStartedAt = null;
     _sessionStartedAt = null;
     _jumpEventMillis.clear();
+    _counterEngine.reset();
+    _pendingAnalysisFrame = null;
+    _lastQueuedFrameTimestampMs = null;
+    _isAnalyzingFrame = false;
     return token;
   }
 
@@ -189,16 +291,48 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
   }
 
   Future<bool> _startCapture(ParentCameraDevice device, int token) async {
+    final analyzer = _poseAnalyzer;
+    if (analyzer == null) {
+      state = state.copyWith(
+        isRecording: false,
+        isFrameVisible: true,
+        errorKey: 'jumpCounterInitFailed',
+        clearErrorDetail: true,
+      );
+      return false;
+    }
+
     try {
-      await device.startRecording();
-      if (!ref.mounted || token != _countdownToken) {
-        return false;
-      }
+      await analyzer.startSession();
       _captureStartedAt = DateTime.now();
       _sessionStartedAt = null;
       _jumpEventMillis.clear();
+      _counterEngine.reset();
+      _pendingAnalysisFrame = null;
+      _lastQueuedFrameTimestampMs = null;
+      _isAnalyzingFrame = false;
+      await device.startRecording(onFrameAvailable: _queueAnalysisFrame);
+      if (!ref.mounted || token != _countdownToken) {
+        return false;
+      }
       return true;
+    } on JumpRopePoseAnalyzerException catch (error) {
+      _captureStartedAt = null;
+      if (!ref.mounted || token != _countdownToken) {
+        return false;
+      }
+      state = state.copyWith(
+        isRecording: false,
+        isFrameVisible: true,
+        errorKey: error.errorKey,
+        errorDetail: error.detail,
+      );
+      return false;
     } catch (_) {
+      _captureStartedAt = null;
+      try {
+        await analyzer.stopSession();
+      } catch (_) {}
       if (!ref.mounted || token != _countdownToken) {
         return false;
       }
@@ -217,7 +351,12 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
     state = state.copyWith(
       isRecording: true,
       jumpCount: 0,
+      analysisStatusKey: 'parentCameraAnalysisSearching',
+      analysisFps: 0,
+      analysisLatencyMs: 0,
+      didApplyCountCorrection: false,
       remainingRecordSeconds: state.recordDurationSeconds,
+      detectedPoses: const <JumpRopePose>[],
     );
     _startRecordingTimer();
   }
@@ -228,6 +367,104 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
     }
     _addJumpEvent();
     state = state.copyWith(jumpCount: state.jumpCount + 1);
+  }
+
+  void _queueAnalysisFrame(ParentCameraFrame frame) {
+    final captureStartedAt = _captureStartedAt;
+    if (!state.isRecording || captureStartedAt == null) {
+      return;
+    }
+
+    var relativeTimestampMs =
+        frame.timestampMs - captureStartedAt.millisecondsSinceEpoch;
+    if (relativeTimestampMs < 0) {
+      relativeTimestampMs = 0;
+    }
+
+    final lastQueuedFrameTimestampMs = _lastQueuedFrameTimestampMs;
+    if (lastQueuedFrameTimestampMs != null &&
+        relativeTimestampMs <= lastQueuedFrameTimestampMs) {
+      relativeTimestampMs = lastQueuedFrameTimestampMs + 1;
+    }
+    _lastQueuedFrameTimestampMs = relativeTimestampMs;
+
+    _pendingAnalysisFrame = frame.copyWith(timestampMs: relativeTimestampMs);
+    if (_isAnalyzingFrame) {
+      return;
+    }
+    unawaited(_drainAnalysisFrames());
+  }
+
+  Future<void> _drainAnalysisFrames() async {
+    final analyzer = _poseAnalyzer;
+    if (analyzer == null || _isAnalyzingFrame) {
+      return;
+    }
+
+    _isAnalyzingFrame = true;
+    try {
+      while (ref.mounted && state.isRecording) {
+        final frame = _takeNextAnalysisFrame();
+        if (frame == null) {
+          break;
+        }
+        try {
+          final poseResult = await analyzer.analyzeFrame(frame);
+          if (!ref.mounted || !state.isRecording) {
+            break;
+          }
+          final counterUpdate = _counterEngine.ingest(poseResult);
+          _applyCounterUpdate(counterUpdate, poseResult.poses);
+        } on JumpRopePoseAnalyzerException catch (error) {
+          _handleAnalyzerRuntimeError(error);
+          break;
+        } catch (_) {
+          _handleAnalyzerRuntimeError(
+            const JumpRopePoseAnalyzerException('jumpCounterRuntimeFailed'),
+          );
+          break;
+        }
+      }
+    } finally {
+      _isAnalyzingFrame = false;
+    }
+  }
+
+  ParentCameraFrame? _takeNextAnalysisFrame() {
+    final frame = _pendingAnalysisFrame;
+    _pendingAnalysisFrame = null;
+    return frame;
+  }
+
+  void _applyCounterUpdate(
+    JumpRopeCounterUpdate update,
+    List<JumpRopePose> detectedPoses,
+  ) {
+    final newJumpEventMillis = update.newJumpEventMillis;
+    if (newJumpEventMillis != null) {
+      _jumpEventMillis.add(newJumpEventMillis);
+    }
+    state = state.copyWith(
+      jumpCount: update.jumpCount,
+      analysisStatusKey: update.statusKey,
+      analysisFps: update.analysisFps,
+      analysisLatencyMs: update.analysisLatencyMs,
+      detectedPoses: List<JumpRopePose>.unmodifiable(detectedPoses),
+      clearError: update.statusKey == 'parentCameraAnalysisTracking',
+    );
+  }
+
+  void _handleAnalyzerRuntimeError(JumpRopePoseAnalyzerException error) {
+    if (!ref.mounted) {
+      return;
+    }
+    _pendingAnalysisFrame = null;
+    state = state.copyWith(
+      analysisStatusKey: 'parentCameraAnalysisPaused',
+      errorKey: error.errorKey,
+      errorDetail: error.detail,
+      detectedPoses: const <JumpRopePose>[],
+    );
   }
 
   void _addJumpEvent() {
@@ -253,6 +490,7 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
       clearSummary: true,
       isProcessingVideo: false,
       isSavingVideo: false,
+      detectedPoses: const <JumpRopePose>[],
       clearFeedback: true,
       clearFeedbackDetail: true,
       clearErrorDetail: true,
@@ -267,10 +505,13 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
     }
 
     _recordTimer?.cancel();
+    _pendingAnalysisFrame = null;
     state = state.copyWith(
       isRecording: false,
       isProcessingVideo: true,
       isFrameVisible: true,
+      analysisStatusKey: 'parentCameraAnalysisCorrection',
+      detectedPoses: const <JumpRopePose>[],
       clearError: true,
       clearErrorDetail: true,
       clearFeedback: true,
@@ -278,7 +519,17 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
     );
 
     final stopResult = await _stopRecordingDevice(device);
-    final baseSummary = _buildSummary();
+    await _stopAnalyzerSession();
+    final finalCountResult = _resolveFinalCountResult(
+      _counterEngine.finalizeSession(),
+    );
+    _jumpEventMillis
+      ..clear()
+      ..addAll(finalCountResult.jumpEventMillis);
+    final baseSummary = _buildSummary(
+      jumpCount: finalCountResult.jumpCount,
+      jumpEventMillis: finalCountResult.jumpEventMillis,
+    );
     final finalizedVideoResult = await _finalizeRecordedVideo(
       baseSummary: baseSummary,
       sourceVideoPath: stopResult.videoPath,
@@ -306,6 +557,12 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
       ),
       errorDetail: finalizedVideoResult.errorDetail,
     );
+    state = state.copyWith(
+      analysisStatusKey: finalCountResult.statusKey,
+      analysisFps: finalCountResult.analysisFps,
+      analysisLatencyMs: finalCountResult.analysisLatencyMs,
+      didApplyCountCorrection: finalCountResult.correctionApplied,
+    );
   }
 
   Future<_StopRecordingResult> _stopRecordingDevice(
@@ -322,14 +579,20 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
     }
   }
 
-  ParentCameraSummary _buildSummary({String? videoPath}) {
+  ParentCameraSummary _buildSummary({
+    String? videoPath,
+    int? jumpCount,
+    List<int>? jumpEventMillis,
+  }) {
     return ParentCameraSummary(
       recordId: DateTime.now().millisecondsSinceEpoch.toString(),
       startedAt: _sessionStartedAt ?? DateTime.now(),
-      jumpCount: state.jumpCount,
+      jumpCount: jumpCount ?? state.jumpCount,
       durationSeconds: _completedDurationSeconds(),
       videoPath: videoPath,
-      jumpEventMillis: List<int>.unmodifiable(_jumpEventMillis),
+      jumpEventMillis: List<int>.unmodifiable(
+        jumpEventMillis ?? _jumpEventMillis,
+      ),
     );
   }
 
@@ -398,6 +661,7 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
       summary: summary,
       isVideoSaved: false,
       isSavingVideo: false,
+      analysisStatusKey: 'parentCameraAnalysisCompleted',
       clearFeedback: true,
       clearFeedbackDetail: true,
     );
@@ -497,11 +761,19 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
       clearErrorDetail: true,
       isFrameVisible: true,
       jumpCount: 0,
+      analysisStatusKey: 'parentCameraAnalysisSearching',
+      analysisFps: 0,
+      analysisLatencyMs: 0,
+      didApplyCountCorrection: false,
       remainingRecordSeconds: state.recordDurationSeconds,
+      detectedPoses: const <JumpRopePose>[],
     );
     _captureStartedAt = null;
     _sessionStartedAt = null;
     _jumpEventMillis.clear();
+    _counterEngine.reset();
+    _pendingAnalysisFrame = null;
+    _lastQueuedFrameTimestampMs = null;
   }
 
   void clearFeedback() {
@@ -516,12 +788,19 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
     if (clearState && ref.mounted) {
       state = state.copyWith(
         isInitializing: false,
+        isAnalyzerInitializing: false,
+        isAnalyzerReady: _poseAnalyzer != null,
         isCountdownActive: false,
         resetCountdownValue: true,
         isRecording: false,
         isProcessingVideo: false,
         isFrameVisible: false,
         remainingRecordSeconds: recordDurationSeconds,
+        analysisStatusKey: 'parentCameraAnalysisSearching',
+        analysisFps: 0,
+        analysisLatencyMs: 0,
+        didApplyCountCorrection: false,
+        detectedPoses: const <JumpRopePose>[],
         clearDevice: true,
         clearSummary: true,
         isSavingVideo: false,
@@ -545,12 +824,19 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
 
     state = state.copyWith(
       isInitializing: false,
+      isAnalyzerInitializing: false,
+      isAnalyzerReady: _poseAnalyzer != null,
       isCountdownActive: false,
       resetCountdownValue: true,
       isRecording: false,
       isProcessingVideo: false,
       isFrameVisible: false,
       remainingRecordSeconds: recordDurationSeconds,
+      analysisStatusKey: 'parentCameraAnalysisSearching',
+      analysisFps: 0,
+      analysisLatencyMs: 0,
+      didApplyCountCorrection: false,
+      detectedPoses: const <JumpRopePose>[],
       errorKey: releaseResult.errorKey,
       clearErrorDetail: true,
       clearDevice: true,
@@ -569,11 +855,15 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
     _device = null;
     _recordTimer?.cancel();
     _recordTimer = null;
+    _pendingAnalysisFrame = null;
+    _isAnalyzingFrame = false;
+    _lastQueuedFrameTimestampMs = null;
 
     if (device == null) {
       _captureStartedAt = null;
       _sessionStartedAt = null;
       _jumpEventMillis.clear();
+      _counterEngine.reset();
       return _ReleaseCameraResult(errorKey: captureErrorKey);
     }
 
@@ -581,6 +871,8 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
     _captureStartedAt = null;
     _sessionStartedAt = null;
     _jumpEventMillis.clear();
+    _counterEngine.reset();
+    _lastQueuedFrameTimestampMs = null;
 
     try {
       if (device.isRecording) {
@@ -593,6 +885,43 @@ class ParentCameraViewModel extends Notifier<ParentCameraState> {
     }
 
     return _ReleaseCameraResult(errorKey: errorKey);
+  }
+
+  Future<void> _stopAnalyzerSession() async {
+    final analyzer = _poseAnalyzer;
+    if (analyzer == null) {
+      return;
+    }
+    try {
+      await analyzer.stopSession();
+    } catch (_) {}
+  }
+
+  Future<void> _disposeAnalyzer() async {
+    final analyzer = _poseAnalyzer;
+    _poseAnalyzer = null;
+    if (analyzer == null) {
+      return;
+    }
+    try {
+      await analyzer.dispose();
+    } catch (_) {}
+  }
+
+  JumpRopeCounterSessionResult _resolveFinalCountResult(
+    JumpRopeCounterSessionResult counterResult,
+  ) {
+    if (counterResult.jumpCount > 0 || _jumpEventMillis.isEmpty) {
+      return counterResult;
+    }
+    return JumpRopeCounterSessionResult(
+      jumpCount: state.jumpCount,
+      jumpEventMillis: List<int>.unmodifiable(_jumpEventMillis),
+      analysisFps: counterResult.analysisFps,
+      analysisLatencyMs: counterResult.analysisLatencyMs,
+      statusKey: state.analysisStatusKey,
+      correctionApplied: false,
+    );
   }
 
   void _startRecordingTimer() {

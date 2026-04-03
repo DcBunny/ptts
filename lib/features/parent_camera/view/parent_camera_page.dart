@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:tiaosheng/core/i18n/app_i18n.dart';
 import 'package:tiaosheng/features/parent_camera/data/parent_camera_service.dart';
+import 'package:tiaosheng/features/parent_camera/view/parent_camera_pose_overlay.dart';
 import 'package:tiaosheng/features/parent_camera/view_model/parent_camera_state.dart';
 import 'package:tiaosheng/features/parent_camera/view_model/parent_camera_view_model.dart';
 
@@ -62,19 +63,22 @@ class ParentCameraPage extends ConsumerWidget {
               child: Column(
                 children: [
                   if (state.isRecording)
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                    Column(
                       children: [
-                        _InfoBadge(
-                          value: _formatRecordCountdown(
-                            state.remainingRecordSeconds,
-                          ),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _InfoBadge(
+                              value: _formatRecordCountdown(
+                                state.remainingRecordSeconds,
+                              ),
+                            ),
+                            const Spacer(),
+                            _InfoBadge(value: '${state.jumpCount}'),
+                          ],
                         ),
-                        const Spacer(),
-                        GestureDetector(
-                          onTap: viewModel.incrementJumpCount,
-                          child: _InfoBadge(value: '${state.jumpCount}'),
-                        ),
+                        const SizedBox(height: 12),
+                        _AnalysisStatusCard(state: state),
                       ],
                     )
                   else
@@ -117,6 +121,12 @@ class ParentCameraPage extends ConsumerWidget {
                         return Stack(
                           fit: StackFit.expand,
                           children: [
+                            if (state.isRecording)
+                              ParentCameraPoseOverlay(
+                                poses: state.detectedPoses,
+                                previewSize: state.device?.previewSize,
+                                analysisStatusKey: state.analysisStatusKey,
+                              ),
                             if (!state.isRecording)
                               Center(
                                 child: _FocusFrame(
@@ -278,6 +288,9 @@ class ParentCameraPage extends ConsumerWidget {
     if (state.isInitializing) {
       return i18n.parentCameraInitializing;
     }
+    if (state.isAnalyzerInitializing) {
+      return i18n.parentCameraAnalysisPreparing;
+    }
     if (state.isRecording) {
       return i18n.parentCameraRecording;
     }
@@ -285,6 +298,57 @@ class ParentCameraPage extends ConsumerWidget {
       return i18n.parentCameraProcessingVideo;
     }
     return i18n.parentCameraStart;
+  }
+}
+
+class _AnalysisStatusCard extends StatelessWidget {
+  const _AnalysisStatusCard({required this.state});
+
+  final ParentCameraState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final i18n = context.i18n;
+    final statusText = i18n.parentCameraAnalysisStatus(state.analysisStatusKey);
+    final fpsText = state.analysisFps <= 0
+        ? '--'
+        : state.analysisFps.toStringAsFixed(1);
+    final latencyText = state.analysisLatencyMs <= 0
+        ? '--'
+        : '${state.analysisLatencyMs} ms';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xB81B1B1F),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0x26FFFFFF)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              statusText,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Text(
+            '${i18n.parentCameraAnalysisMetrics} $fpsText FPS · $latencyText',
+            style: const TextStyle(
+              color: Color(0xB3FFFFFF),
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

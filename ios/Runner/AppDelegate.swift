@@ -8,6 +8,7 @@ private let composeWithOverlayMethod = "composeWithOverlay"
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private let composer = IOSSessionVideoOverlayComposer()
+  private var jumpRopePoseAnalyzerChannel: JumpRopePoseAnalyzerChannel?
 
   override func application(
     _ application: UIApplication,
@@ -32,6 +33,7 @@ private let composeWithOverlayMethod = "composeWithOverlay"
     channel.setMethodCallHandler { [weak self] call, result in
       self?.handleMethodCall(call, result: result)
     }
+    jumpRopePoseAnalyzerChannel = try? JumpRopePoseAnalyzerChannel(registrar: registrar)
   }
 
   private func handleMethodCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {

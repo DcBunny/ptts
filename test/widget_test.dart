@@ -13,6 +13,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tiaosheng/core/app/tiaosheng_app.dart';
 import 'package:tiaosheng/core/storage/shared_preferences_storage.dart';
 import 'package:tiaosheng/features/jump_session/view_model/jump_session_view_model.dart';
+import 'package:tiaosheng/features/parent_camera/data/jump_rope_pose_analyzer.dart';
+import 'package:tiaosheng/features/parent_camera/data/jump_rope_pose_models.dart';
+import 'package:tiaosheng/features/parent_camera/data/parent_camera_frame.dart';
 import 'package:tiaosheng/features/parent_camera/data/parent_camera_service.dart';
 import 'package:tiaosheng/features/parent_camera/view_model/parent_camera_view_model.dart';
 
@@ -27,6 +30,9 @@ void main() {
           localStorageProvider.overrideWithValue(storage),
           parentCameraServiceProvider.overrideWithValue(
             _FakeParentCameraService(),
+          ),
+          jumpRopeCounterAnalyzerProvider.overrideWithValue(
+            _FakeJumpRopePoseAnalyzer(),
           ),
         ],
         child: const TiaoShengApp(),
@@ -92,6 +98,9 @@ class _FakeParentCameraDevice implements ParentCameraDevice {
   bool get isRecording => _isRecording;
 
   @override
+  int get sensorOrientation => 90;
+
+  @override
   Size? get previewSize => const Size(720, 1280);
 
   @override
@@ -103,7 +112,9 @@ class _FakeParentCameraDevice implements ParentCameraDevice {
   Future<void> dispose() async {}
 
   @override
-  Future<void> startRecording() async {
+  Future<void> startRecording({
+    ParentCameraFrameListener? onFrameAvailable,
+  }) async {
     _isRecording = true;
   }
 
@@ -112,4 +123,23 @@ class _FakeParentCameraDevice implements ParentCameraDevice {
     _isRecording = false;
     return 'mock://parent_camera/latest.mp4';
   }
+}
+
+class _FakeJumpRopePoseAnalyzer implements JumpRopePoseAnalyzer {
+  @override
+  Future<JumpRopePoseFrameResult> analyzeFrame(ParentCameraFrame frame) {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<void> dispose() async {}
+
+  @override
+  Future<void> initialize() async {}
+
+  @override
+  Future<void> startSession() async {}
+
+  @override
+  Future<void> stopSession() async {}
 }

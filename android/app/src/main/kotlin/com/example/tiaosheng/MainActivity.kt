@@ -43,6 +43,7 @@ private const val LOG_TAG = "SessionVideoOverlay"
 
 class MainActivity : FlutterActivity() {
   private val composeExecutor = Executors.newSingleThreadExecutor()
+  private var jumpRopePoseAnalyzerChannel: JumpRopePoseAnalyzerChannel? = null
 
   override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
     super.configureFlutterEngine(flutterEngine)
@@ -54,9 +55,15 @@ class MainActivity : FlutterActivity() {
         }
         handleComposeCall(call, result)
       }
+    jumpRopePoseAnalyzerChannel = JumpRopePoseAnalyzerChannel(
+      context = applicationContext,
+      messenger = flutterEngine.dartExecutor.binaryMessenger,
+    )
   }
 
   override fun onDestroy() {
+    jumpRopePoseAnalyzerChannel?.dispose()
+    jumpRopePoseAnalyzerChannel = null
     composeExecutor.shutdown()
     super.onDestroy()
   }

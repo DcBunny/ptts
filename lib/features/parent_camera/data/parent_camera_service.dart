@@ -1,21 +1,28 @@
+import 'dart:io';
+
 import 'package:camera/camera.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import 'package:tiaosheng/features/parent_camera/data/parent_camera_frame.dart';
 
 abstract class ParentCameraService {
   Future<ParentCameraDevice> createDefaultDevice();
 }
+
+typedef ParentCameraFrameListener = void Function(ParentCameraFrame frame);
 
 abstract class ParentCameraDevice {
   bool get isInitialized;
 
   bool get isRecording;
 
+  int get sensorOrientation;
+
   Size? get previewSize;
 
   Widget buildPreview();
 
-  Future<void> startRecording();
+  Future<void> startRecording({ParentCameraFrameListener? onFrameAvailable});
 
   Future<String?> stopRecording();
 
@@ -37,6 +44,9 @@ class CameraParentCameraService implements ParentCameraService {
         _pickPreferredCamera(cameras),
         ResolutionPreset.high,
         enableAudio: false,
+        imageFormatGroup: Platform.isIOS
+            ? ImageFormatGroup.bgra8888
+            : ImageFormatGroup.nv21,
       );
 
       await controller.initialize();
@@ -75,6 +85,9 @@ class CameraPluginParentCameraDevice implements ParentCameraDevice {
   bool get isRecording => _controller.value.isRecordingVideo;
 
   @override
+  int get sensorOrientation => _controller.description.sensorOrientation;
+
+  @override
   Size? get previewSize => _controller.value.previewSize;
 
   @override
@@ -83,8 +96,21 @@ class CameraPluginParentCameraDevice implements ParentCameraDevice {
   }
 
   @override
-  Future<void> startRecording() {
-    return _controller.startVideoRecording();
+  Future<void> startRecording({ParentCameraFrameListener? onFrameAvailable}) {
+    return _controller.startVideoRecording(
+      onAvailable: onFrameAvailable == null
+          ? null
+          : (image) {
+              final timestampMs = DateTime.now().millisecondsSinceEpoch;
+              onFrameAvailable(
+                ParentCameraFrame.fromCameraImage(
+                  image: image,
+                  rotationDegrees: sensorOrientation,
+                  timestampMs: timestampMs,
+                ),
+              );
+            },
+    );
   }
 
   @override

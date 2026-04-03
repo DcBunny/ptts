@@ -51,6 +51,15 @@ class AppI18n {
       'parentCameraInitializing': '相机准备中',
       'parentCameraRecording': '录制中',
       'parentCameraProcessingVideo': '正在生成本地视频',
+      'parentCameraAnalysisPreparing': '正在准备识别模型',
+      'parentCameraAnalysisSearching': '请保持单人全身进入画面',
+      'parentCameraAnalysisTracking': '正在实时识别跳绳',
+      'parentCameraAnalysisLowConfidence': '画面不稳定，已暂停计数',
+      'parentCameraAnalysisMultiplePeople': '检测到多人入镜，已暂停计数',
+      'parentCameraAnalysisPaused': '识别异常，已暂停自动计数',
+      'parentCameraAnalysisCorrection': '正在校正本次计数',
+      'parentCameraAnalysisCompleted': '计数已完成',
+      'parentCameraAnalysisMetrics': '识别',
       'parentCameraSummaryTitle': '本次成绩',
       'parentCameraSummaryScore': '成绩',
       'parentCameraSummaryTime': '时间',
@@ -70,6 +79,9 @@ class AppI18n {
       'cameraInitFailed': '相机启动失败，请稍后重试',
       'cameraRecordStartFailed': '开始录制失败，请重新尝试',
       'cameraRecordStopFailed': '结束录制失败，但你仍可以返回首页',
+      'jumpCounterInitFailed': '跳绳识别初始化失败，请稍后重试',
+      'jumpCounterRuntimeFailed': '跳绳识别中断，本次将停止自动计数',
+      'jumpCounterBackendUnsupported': '当前识别后端暂不支持，请切换到 MediaPipe',
       'videoUnavailable': '当前没有可保存的视频文件',
       'videoSaveSuccess': '视频已保存到系统相册',
       'videoSaveFailed': '视频保存失败，请稍后重试',
@@ -122,6 +134,17 @@ class AppI18n {
       'parentCameraInitializing': 'Preparing camera',
       'parentCameraRecording': 'Recording',
       'parentCameraProcessingVideo': 'Preparing local video',
+      'parentCameraAnalysisPreparing': 'Preparing pose model',
+      'parentCameraAnalysisSearching': 'Keep one full body inside the frame',
+      'parentCameraAnalysisTracking': 'Counting jumps in real time',
+      'parentCameraAnalysisLowConfidence':
+          'Image quality is unstable. Counting paused',
+      'parentCameraAnalysisMultiplePeople':
+          'Multiple people detected. Counting paused',
+      'parentCameraAnalysisPaused': 'Detection paused after an analyzer error',
+      'parentCameraAnalysisCorrection': 'Refining the final jump count',
+      'parentCameraAnalysisCompleted': 'Counting finished',
+      'parentCameraAnalysisMetrics': 'Analysis',
       'parentCameraSummaryTitle': 'Session Summary',
       'parentCameraSummaryScore': 'Score',
       'parentCameraSummaryTime': 'Time',
@@ -143,6 +166,12 @@ class AppI18n {
       'cameraRecordStartFailed': 'Failed to start recording. Please try again',
       'cameraRecordStopFailed':
           'Failed to stop recording, but you can still go back',
+      'jumpCounterInitFailed':
+          'Failed to initialize jump counting. Please try again later',
+      'jumpCounterRuntimeFailed':
+          'Jump counting stopped after an analyzer error',
+      'jumpCounterBackendUnsupported':
+          'Selected pose backend is not supported on this build',
       'videoUnavailable': 'No video is available to save',
       'videoSaveSuccess': 'Video saved to photo library',
       'videoSaveFailed': 'Failed to save the video. Please try again later',
@@ -231,6 +260,32 @@ class AppI18n {
   String get parentCameraProcessingVideo =>
       _text('parentCameraProcessingVideo');
 
+  String get parentCameraAnalysisPreparing =>
+      _text('parentCameraAnalysisPreparing');
+
+  String get parentCameraAnalysisSearching =>
+      _text('parentCameraAnalysisSearching');
+
+  String get parentCameraAnalysisTracking =>
+      _text('parentCameraAnalysisTracking');
+
+  String get parentCameraAnalysisLowConfidence =>
+      _text('parentCameraAnalysisLowConfidence');
+
+  String get parentCameraAnalysisMultiplePeople =>
+      _text('parentCameraAnalysisMultiplePeople');
+
+  String get parentCameraAnalysisPaused => _text('parentCameraAnalysisPaused');
+
+  String get parentCameraAnalysisCorrection =>
+      _text('parentCameraAnalysisCorrection');
+
+  String get parentCameraAnalysisCompleted =>
+      _text('parentCameraAnalysisCompleted');
+
+  String get parentCameraAnalysisMetrics =>
+      _text('parentCameraAnalysisMetrics');
+
   String get parentCameraSummaryTitle => _text('parentCameraSummaryTitle');
 
   String get parentCameraSummaryScore => _text('parentCameraSummaryScore');
@@ -273,6 +328,13 @@ class AppI18n {
 
   String get cameraRecordStopFailed => _text('cameraRecordStopFailed');
 
+  String get jumpCounterInitFailed => _text('jumpCounterInitFailed');
+
+  String get jumpCounterRuntimeFailed => _text('jumpCounterRuntimeFailed');
+
+  String get jumpCounterBackendUnsupported =>
+      _text('jumpCounterBackendUnsupported');
+
   String get videoUnavailable => _text('videoUnavailable');
 
   String get videoSaveSuccess => _text('videoSaveSuccess');
@@ -306,6 +368,12 @@ class AppI18n {
         return cameraRecordStartFailed;
       case 'cameraRecordStopFailed':
         return cameraRecordStopFailed;
+      case 'jumpCounterInitFailed':
+        return jumpCounterInitFailed;
+      case 'jumpCounterRuntimeFailed':
+        return jumpCounterRuntimeFailed;
+      case 'jumpCounterBackendUnsupported':
+        return jumpCounterBackendUnsupported;
       case 'cameraInitFailed':
       default:
         return cameraInitFailed;
@@ -371,6 +439,28 @@ class AppI18n {
         return parentCameraOverlayRhythmSlow;
       default:
         return key;
+    }
+  }
+
+  String parentCameraAnalysisStatus(String key) {
+    switch (key) {
+      case 'parentCameraAnalysisPreparing':
+        return parentCameraAnalysisPreparing;
+      case 'parentCameraAnalysisTracking':
+        return parentCameraAnalysisTracking;
+      case 'parentCameraAnalysisLowConfidence':
+        return parentCameraAnalysisLowConfidence;
+      case 'parentCameraAnalysisMultiplePeople':
+        return parentCameraAnalysisMultiplePeople;
+      case 'parentCameraAnalysisPaused':
+        return parentCameraAnalysisPaused;
+      case 'parentCameraAnalysisCorrection':
+        return parentCameraAnalysisCorrection;
+      case 'parentCameraAnalysisCompleted':
+        return parentCameraAnalysisCompleted;
+      case 'parentCameraAnalysisSearching':
+      default:
+        return parentCameraAnalysisSearching;
     }
   }
 

@@ -46,9 +46,7 @@ dependencies:
   json_annotation: ^4.11.0
   hooks_riverpod: ^3.2.1
   flutter_hooks: ^0.21.3+1
-  riverpod_annotation: ^4.0.2
   gal: ^2.3.2
-
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -78,6 +76,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/images/parent_frame.png
+    - assets/models/pose_landmarker_lite.task
 
 flutter_launcher_icons:
   android: true
