@@ -1,0 +1,36 @@
+<resources>
+    <string name="app_name">葡萄跳绳</string>
+    <string name="best_record">最佳记录</string>
+    <string name="best_record_empty">暂无训练记录</string>
+    <string name="best_record_subtitle">继续保持！</string>
+    <string name="duration">跳绳时长</string>
+    <string name="parent_photo">家长拍照</string>
+    <string name="parent_photo_hint">进入家长拍照页后即可开始录制</string>
+    <string name="parent_camera_guide">请将跳绳者放在人像框内</string>
+    <string name="parent_camera_start">开始记录</string>
+    <string name="parent_camera_recording">录制中</string>
+    <string name="parent_camera_exit">退出</string>
+    <string name="parent_camera_permission_title">需要相机权限</string>
+    <string name="parent_camera_permission_body">授权后即可实时识别跳绳动作并计数</string>
+    <string name="parent_camera_permission_action">开启相机</string>
+    <string name="parent_camera_permission_denied">未获得相机权限</string>
+    <string name="parent_camera_no_camera">没有可用的后置摄像头</string>
+    <string name="parent_camera_error">相机暂时不可用，请退出后重试</string>
+    <string name="parent_camera_processing_video">正在生成本地视频</string>
+    <string name="parent_camera_analysis_tracking">正在实时识别跳绳</string>
+    <string name="parent_camera_analysis_waiting">请保持全身入框</string>
+    <string name="parent_camera_analysis_lost">暂未识别到完整人体</string>
+    <string name="parent_camera_analysis_metrics">识别 %1$.1f FPS · %2$d ms</string>
+    <string name="parent_camera_summary_title">本次成绩</string>
+    <string name="parent_camera_summary_score">成绩</string>
+    <string name="parent_camera_summary_best">最佳记录</string>
+    <string name="parent_camera_summary_time">时间</string>
+    <string name="parent_camera_summary_save">完成</string>
+    <string name="parent_camera_summary_retry">再来一次</string>
+    <string name="parent_camera_save_video">保存视频</string>
+    <string name="parent_camera_saving">保存中…</string>
+    <string name="duration_decrease">减少时长</string>
+    <string name="duration_increase">增加时长</string>
+    <string name="duration_display">当前时长</string>
+    <string name="jump_count_label">跳绳次数</string>
+</resources>
