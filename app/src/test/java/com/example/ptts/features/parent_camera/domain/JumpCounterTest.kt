@@ -98,6 +98,91 @@ class JumpCounterTest {
     }
 
     @Test
+    fun distantSmallMotion_countsWithBodyScaledThresholds() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY, bodyScale = 0.55f))
+        var cycleStartMs = 90L
+
+        repeat(16) {
+            result = counter.accept(
+                frame(
+                    timestampMs = cycleStartMs,
+                    footY = GroundFootY - 0.010f,
+                    bodyScale = 0.55f,
+                    bodyOffsetY = -0.006f,
+                ),
+            )
+            result = counter.accept(
+                frame(
+                    timestampMs = cycleStartMs + 70L,
+                    footY = GroundFootY - 0.012f,
+                    bodyScale = 0.55f,
+                    bodyOffsetY = -0.008f,
+                ),
+            )
+            result = counter.accept(
+                frame(
+                    timestampMs = cycleStartMs + 145L,
+                    footY = GroundFootY - 0.003f,
+                    bodyScale = 0.55f,
+                    bodyOffsetY = -0.002f,
+                ),
+            )
+            result = counter.accept(frame(timestampMs = cycleStartMs + 190L, footY = GroundFootY, bodyScale = 0.55f))
+            cycleStartMs += 330L
+        }
+
+        assertEquals(16, result.count)
+    }
+
+    @Test
+    fun bodyMotionCountsWhenFootSignalIsWeakFromSideAngle() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+        var cycleStartMs = 90L
+
+        repeat(14) {
+            result = counter.accept(
+                frame(
+                    timestampMs = cycleStartMs,
+                    footY = GroundFootY - 0.004f,
+                    bodyOffsetY = -0.018f,
+                    leftAnkleConfidence = 0.2f,
+                    rightAnkleConfidence = 0.2f,
+                    leftHeelConfidence = 0.2f,
+                    rightHeelConfidence = 0.2f,
+                ),
+            )
+            result = counter.accept(
+                frame(
+                    timestampMs = cycleStartMs + 70L,
+                    footY = GroundFootY - 0.004f,
+                    bodyOffsetY = -0.024f,
+                    leftAnkleConfidence = 0.2f,
+                    rightAnkleConfidence = 0.2f,
+                    leftHeelConfidence = 0.2f,
+                    rightHeelConfidence = 0.2f,
+                ),
+            )
+            result = counter.accept(
+                frame(
+                    timestampMs = cycleStartMs + 145L,
+                    footY = GroundFootY,
+                    bodyOffsetY = -0.006f,
+                    leftAnkleConfidence = 0.2f,
+                    rightAnkleConfidence = 0.2f,
+                    leftHeelConfidence = 0.2f,
+                    rightHeelConfidence = 0.2f,
+                ),
+            )
+            result = counter.accept(frame(timestampMs = cycleStartMs + 190L, footY = GroundFootY))
+            cycleStartMs += 330L
+        }
+
+        assertEquals(14, result.count)
+    }
+
+    @Test
     fun asymmetricFeet_stillCountAsOneJump() {
         val counter = JumpCounter()
         var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
@@ -330,6 +415,34 @@ class JumpCounterTest {
     }
 
     @Test
+    fun poseLossThenRecovery_doesNotCreateGhostCounts() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+
+        result = counter.accept(frame(timestampMs = 120L, footY = GroundFootY - 0.06f))
+        result = counter.accept(frame(timestampMs = 190L, footY = GroundFootY - 0.07f))
+        result = counter.accept(frame(timestampMs = 260L, footY = GroundFootY))
+        assertEquals(1, result.count)
+
+        result = counter.accept(PoseFrame(timestampMs = 1200L, landmarks = emptyMap()))
+        result = counter.accept(frame(timestampMs = 1600L, footY = GroundFootY))
+        result = counter.accept(frame(timestampMs = 1720L, footY = GroundFootY))
+        result = counter.accept(frame(timestampMs = 1840L, footY = GroundFootY))
+        assertEquals(1, result.count)
+
+        var cycleStartMs = 2050L
+        repeat(6) {
+            result = counter.accept(frame(timestampMs = cycleStartMs, footY = GroundFootY - 0.055f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 65L, footY = GroundFootY - 0.070f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 140L, footY = GroundFootY - 0.010f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 185L, footY = GroundFootY))
+            cycleStartMs += 330L
+        }
+
+        assertEquals(7, result.count)
+    }
+
+    @Test
     fun slowBodyFloat_doesNotCountAsJumping() {
         val counter = JumpCounter()
         var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
@@ -395,17 +508,22 @@ class JumpCounterTest {
         includeKnees: Boolean = true,
         includeLeftFoot: Boolean = true,
         includeRightFoot: Boolean = true,
+        bodyOffsetY: Float = 0f,
+        bodyScale: Float = 1f,
     ): PoseFrame {
         val landmarks = mutableMapOf<BodyLandmark, PosePoint>()
+        val hipY = GroundFootY - 0.35f * bodyScale + bodyOffsetY
+        val shoulderY = hipY - 0.27f * bodyScale
+        val kneeY = GroundFootY - 0.18f * bodyScale + bodyOffsetY
         if (includeTorso) {
-            landmarks[BodyLandmark.LeftShoulder] = point(0.42f, 0.28f, confidence)
-            landmarks[BodyLandmark.RightShoulder] = point(0.58f, 0.28f, confidence)
-            landmarks[BodyLandmark.LeftHip] = point(0.44f, 0.55f, confidence)
-            landmarks[BodyLandmark.RightHip] = point(0.56f, 0.55f, confidence)
+            landmarks[BodyLandmark.LeftShoulder] = point(0.42f, shoulderY, confidence)
+            landmarks[BodyLandmark.RightShoulder] = point(0.58f, shoulderY, confidence)
+            landmarks[BodyLandmark.LeftHip] = point(0.44f, hipY, confidence)
+            landmarks[BodyLandmark.RightHip] = point(0.56f, hipY, confidence)
         }
         if (includeKnees) {
-            landmarks[BodyLandmark.LeftKnee] = point(0.45f, 0.72f, confidence)
-            landmarks[BodyLandmark.RightKnee] = point(0.55f, 0.72f, confidence)
+            landmarks[BodyLandmark.LeftKnee] = point(0.45f, kneeY, confidence)
+            landmarks[BodyLandmark.RightKnee] = point(0.55f, kneeY, confidence)
         }
         if (includeLeftFoot) {
             landmarks[BodyLandmark.LeftAnkle] = point(0.46f, leftFootY, leftAnkleConfidence)
