@@ -24,6 +24,7 @@ class JumpCameraController(
     private val previewView: PreviewView,
     private val analyzer: PoseFrameAnalyzer,
     private val onError: (Throwable) -> Unit,
+    private val onRecordingFinalized: (Result<File>) -> Unit,
 ) {
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainExecutor = ContextCompat.getMainExecutor(context)
@@ -47,36 +48,42 @@ class JumpCameraController(
     }
 
     fun stop() {
-        activeRecording?.stop()
+        val recording = activeRecording
         activeRecording = null
+        recording?.stop()
         cameraProvider?.unbindAll()
         analyzer.close()
         analysisExecutor.shutdown()
     }
 
-    fun startRecording(): File? {
-        val rec = recorder ?: return null
+    fun startRecording(): Boolean {
+        val rec = recorder ?: return false
         pendingVideoFile = File.createTempFile("jump_", ".mp4", context.cacheDir)
         val outputOptions = FileOutputOptions.Builder(pendingVideoFile!!).build()
         activeRecording = rec.prepareRecording(context, outputOptions)
             .start(mainExecutor) { event ->
                 when (event) {
                     is VideoRecordEvent.Finalize -> {
-                        if (!event.hasError()) {
-                            // recording succeeded
+                        val finalizedFile = pendingVideoFile
+                        pendingVideoFile = null
+                        activeRecording = null
+                        if (!event.hasError() && finalizedFile != null && finalizedFile.length() > 0L) {
+                            onRecordingFinalized(Result.success(finalizedFile))
                         } else {
-                            onError(RuntimeException("Recording failed: ${event.error} ${event.cause}"))
+                            val error = RuntimeException("Recording failed: ${event.error} ${event.cause}")
+                            onRecordingFinalized(Result.failure(error))
+                            onError(error)
                         }
                     }
                 }
             }
-        return pendingVideoFile
+        return true
     }
 
-    fun stopRecording(): File? {
-        activeRecording?.stop()
+    fun stopRecording() {
+        val recording = activeRecording
         activeRecording = null
-        return pendingVideoFile
+        recording?.stop()
     }
 
     private fun bind(provider: ProcessCameraProvider) {

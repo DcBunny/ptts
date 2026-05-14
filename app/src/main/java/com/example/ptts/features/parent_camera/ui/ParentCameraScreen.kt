@@ -120,6 +120,7 @@ fun ParentCameraScreen(
             viewModel.onCameraReady()
         },
         onCameraError = viewModel::onCameraError,
+        onRecordingFinalized = viewModel::onRecordingFinalized,
         onPoseFrame = viewModel::onPoseAnalysisResult,
         modifier = modifier,
     )
@@ -141,6 +142,7 @@ private fun ParentCameraContent(
     onSaveVideo: () -> Unit,
     onControllerReady: (JumpCameraController) -> Unit,
     onCameraError: (Throwable) -> Unit,
+    onRecordingFinalized: (Result<java.io.File>) -> Unit,
     onPoseFrame: (PoseAnalysisResult) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -153,6 +155,7 @@ private fun ParentCameraContent(
             CameraPreview(
                 onControllerReady = onControllerReady,
                 onCameraError = onCameraError,
+                onRecordingFinalized = onRecordingFinalized,
                 onPoseFrame = onPoseFrame,
             )
         } else {
@@ -227,6 +230,7 @@ private fun ParentCameraContent(
 private fun CameraPreview(
     onControllerReady: (JumpCameraController) -> Unit,
     onCameraError: (Throwable) -> Unit,
+    onRecordingFinalized: (Result<java.io.File>) -> Unit,
     onPoseFrame: (PoseAnalysisResult) -> Unit,
 ) {
     val context = LocalContext.current
@@ -252,6 +256,7 @@ private fun CameraPreview(
             previewView = previewView,
             analyzer = analyzer,
             onError = onCameraError,
+            onRecordingFinalized = onRecordingFinalized,
         )
         controller.start()
         onControllerReady(controller)
@@ -500,7 +505,7 @@ private fun SummaryCard(
             onClick = onSaveVideo,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp),
-            enabled = state.videoFile != null && !state.isSaving,
+            enabled = state.videoFile != null && !state.isSaving && !state.isFinalizingVideo,
             colors = ButtonDefaults.textButtonColors(
                 containerColor = Color(0xFF4CAF50),
                 contentColor = Color.White,
@@ -509,7 +514,9 @@ private fun SummaryCard(
             ),
         ) {
             Text(
-                text = if (state.isSaving) {
+                text = if (state.isFinalizingVideo) {
+                    stringResource(R.string.parent_camera_processing_video)
+                } else if (state.isSaving) {
                     stringResource(R.string.parent_camera_saving)
                 } else {
                     stringResource(R.string.parent_camera_save_video)
@@ -679,6 +686,7 @@ private fun ParentCameraScreenPreview() {
             onSaveVideo = {},
             onControllerReady = { _ -> },
             onCameraError = { _ -> },
+            onRecordingFinalized = { _ -> },
             onPoseFrame = { _ -> },
         )
     }

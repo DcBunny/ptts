@@ -29,6 +29,7 @@ data class ParentCameraUiState(
     val cameraPermissionGranted: Boolean = false,
     val isCameraReady: Boolean = false,
     val videoFile: java.io.File? = null,
+    val isFinalizingVideo: Boolean = false,
     val isSaving: Boolean = false,
     val saveSuccess: Boolean = false,
 )
