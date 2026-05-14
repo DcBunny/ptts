@@ -30,6 +30,13 @@ class PoseCaptureQualityAnalyzerTest {
     }
 
     @Test
+    fun poseNearFrameEdge_reportsEdgeClipped() {
+        val result = PoseCaptureQualityAnalyzer().analyze(frame(centerY = 0.29f))
+
+        assertEquals(CaptureQualityIssue.EdgeClipped, result.issue)
+    }
+
+    @Test
     fun suddenHorizontalShift_reportsShaky() {
         val analyzer = PoseCaptureQualityAnalyzer()
         analyzer.analyze(frame(centerX = 0.50f))
@@ -49,6 +56,7 @@ class PoseCaptureQualityAnalyzerTest {
 
     private fun frame(
         centerX: Float = 0.50f,
+        centerY: Float = 0.59f,
         bodyScale: Float = 1f,
         confidence: Float = 0.95f,
     ): PoseFrame {
@@ -57,24 +65,24 @@ class PoseCaptureQualityAnalyzerTest {
         val kneeY = 0.72f
         val footY = 0.90f
         val scaled = mapOf(
-            BodyLandmark.LeftShoulder to point(centerX - 0.08f, scaleY(shoulderY, bodyScale), confidence),
-            BodyLandmark.RightShoulder to point(centerX + 0.08f, scaleY(shoulderY, bodyScale), confidence),
-            BodyLandmark.LeftHip to point(centerX - 0.06f, scaleY(hipY, bodyScale), confidence),
-            BodyLandmark.RightHip to point(centerX + 0.06f, scaleY(hipY, bodyScale), confidence),
-            BodyLandmark.LeftKnee to point(centerX - 0.05f, scaleY(kneeY, bodyScale), confidence),
-            BodyLandmark.RightKnee to point(centerX + 0.05f, scaleY(kneeY, bodyScale), confidence),
-            BodyLandmark.LeftAnkle to point(centerX - 0.04f, scaleY(footY, bodyScale), confidence),
-            BodyLandmark.RightAnkle to point(centerX + 0.04f, scaleY(footY, bodyScale), confidence),
+            BodyLandmark.LeftShoulder to point(centerX - 0.08f, scaleY(shoulderY, centerY, bodyScale), confidence),
+            BodyLandmark.RightShoulder to point(centerX + 0.08f, scaleY(shoulderY, centerY, bodyScale), confidence),
+            BodyLandmark.LeftHip to point(centerX - 0.06f, scaleY(hipY, centerY, bodyScale), confidence),
+            BodyLandmark.RightHip to point(centerX + 0.06f, scaleY(hipY, centerY, bodyScale), confidence),
+            BodyLandmark.LeftKnee to point(centerX - 0.05f, scaleY(kneeY, centerY, bodyScale), confidence),
+            BodyLandmark.RightKnee to point(centerX + 0.05f, scaleY(kneeY, centerY, bodyScale), confidence),
+            BodyLandmark.LeftAnkle to point(centerX - 0.04f, scaleY(footY, centerY, bodyScale), confidence),
+            BodyLandmark.RightAnkle to point(centerX + 0.04f, scaleY(footY, centerY, bodyScale), confidence),
         )
         return PoseFrame(timestampMs = 0L, landmarks = scaled)
     }
 
     private fun scaleY(
         y: Float,
+        centerY: Float,
         bodyScale: Float,
     ): Float {
-        val centerY = 0.59f
-        return centerY + (y - centerY) * bodyScale
+        return centerY + (y - BaseCenterY) * bodyScale
     }
 
     private fun point(
@@ -82,4 +90,8 @@ class PoseCaptureQualityAnalyzerTest {
         y: Float,
         confidence: Float,
     ) = PosePoint(x = x, y = y, confidence = confidence)
+
+    private companion object {
+        const val BaseCenterY = 0.59f
+    }
 }

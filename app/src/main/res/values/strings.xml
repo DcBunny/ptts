@@ -21,6 +21,7 @@
     <string name="parent_camera_analysis_waiting">请保持全身入框</string>
     <string name="parent_camera_analysis_lost">暂未识别到完整人体</string>
     <string name="parent_camera_analysis_too_far">距离稍远，请靠近一些</string>
+    <string name="parent_camera_analysis_edge_clipped">头和脚请离画面边缘一点</string>
     <string name="parent_camera_analysis_low_light">光线偏暗或画面模糊</string>
     <string name="parent_camera_analysis_shaky">手机有晃动，请尽量固定</string>
     <string name="parent_camera_analysis_metrics">识别 %1$.1f FPS · %2$d ms · 质量 %3$d</string>

@@ -39,6 +39,10 @@ class PoseCaptureQualityAnalyzer {
             score -= 30
             issue = CaptureQualityIssue.TooFar
         }
+        if (bounds.isNearFrameEdge()) {
+            score -= 26
+            issue = CaptureQualityIssue.EdgeClipped
+        }
         if (averageConfidence < MinAverageConfidence) {
             score -= 28
             issue = CaptureQualityIssue.LowLightOrBlur
@@ -65,6 +69,10 @@ class PoseCaptureQualityAnalyzer {
         val minY = visiblePoints.minOf { it.y }
         val maxY = visiblePoints.maxOf { it.y }
         return PoseBounds(
+            minX = minX,
+            maxX = maxX,
+            minY = minY,
+            maxY = maxY,
             centerX = (minX + maxX) / 2f,
             height = maxY - minY,
         )
@@ -80,7 +88,18 @@ class PoseCaptureQualityAnalyzer {
             normalizedScaleChange >= MaxNormalizedScaleShake
     }
 
+    private fun PoseBounds.isNearFrameEdge(): Boolean {
+        return minX <= EdgeMargin ||
+            maxX >= 1f - EdgeMargin ||
+            minY <= EdgeMargin ||
+            maxY >= 1f - EdgeMargin
+    }
+
     private data class PoseBounds(
+        val minX: Float,
+        val maxX: Float,
+        val minY: Float,
+        val maxY: Float,
         val centerX: Float,
         val height: Float,
     )
@@ -92,6 +111,7 @@ class PoseCaptureQualityAnalyzer {
         const val MinBoundsPoints = 5
         const val MinVisibleRequiredPoints = 6
         const val MinPersonHeight = 0.40f
+        const val EdgeMargin = 0.04f
         const val MaxNormalizedHorizontalShake = 0.055f
         const val MaxNormalizedScaleShake = 0.12f
 

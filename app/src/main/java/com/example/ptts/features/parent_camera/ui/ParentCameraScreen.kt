@@ -376,6 +376,7 @@ private fun AnalysisStatusCard(state: ParentCameraUiState) {
         CaptureQualityIssue.NoPose -> stringResource(R.string.parent_camera_analysis_lost)
         CaptureQualityIssue.PartialBody -> stringResource(R.string.parent_camera_analysis_waiting)
         CaptureQualityIssue.TooFar -> stringResource(R.string.parent_camera_analysis_too_far)
+        CaptureQualityIssue.EdgeClipped -> stringResource(R.string.parent_camera_analysis_edge_clipped)
         CaptureQualityIssue.LowLightOrBlur -> stringResource(R.string.parent_camera_analysis_low_light)
         CaptureQualityIssue.Shaky -> stringResource(R.string.parent_camera_analysis_shaky)
     }

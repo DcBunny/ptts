@@ -65,6 +65,41 @@ class JumpCounterTest {
     }
 
     @Test
+    fun fastChildCadence_countsWithoutDoubleCounting() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+        var cycleStartMs = 70L
+
+        repeat(24) {
+            result = counter.accept(frame(timestampMs = cycleStartMs, footY = GroundFootY - 0.040f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 45L, footY = GroundFootY - 0.056f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 95L, footY = GroundFootY - 0.012f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 130L, footY = GroundFootY))
+            cycleStartMs += 205L
+        }
+
+        assertEquals(24, result.count)
+    }
+
+    @Test
+    fun childKneeDipBeforeJump_stillCountsOnePerLanding() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+        var cycleStartMs = 90L
+
+        repeat(16) {
+            result = counter.accept(frame(timestampMs = cycleStartMs, footY = GroundFootY, bodyOffsetY = 0.018f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 55L, footY = GroundFootY - 0.052f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 110L, footY = GroundFootY - 0.065f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 170L, footY = GroundFootY - 0.010f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 210L, footY = GroundFootY))
+            cycleStartMs += 340L
+        }
+
+        assertEquals(16, result.count)
+    }
+
+    @Test
     fun lowFrameRateJumps_countWhenPeakFrameIsMissed() {
         val counter = JumpCounter()
         var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))

@@ -45,6 +45,7 @@ enum class CaptureQualityIssue {
     NoPose,
     PartialBody,
     TooFar,
+    EdgeClipped,
     LowLightOrBlur,
     Shaky,
 }
