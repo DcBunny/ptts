@@ -63,6 +63,7 @@ import com.example.ptts.features.parent_camera.data.PoseAnalysisResult
 import com.example.ptts.features.parent_camera.data.PoseFrameAnalyzer
 import com.example.ptts.features.parent_camera.domain.BodyLandmark
 import com.example.ptts.features.parent_camera.domain.TrackingQuality
+import com.example.ptts.features.parent_camera.presentation.CaptureQualityIssue
 import com.example.ptts.features.parent_camera.presentation.ParentCameraError
 import com.example.ptts.features.parent_camera.presentation.ParentCameraStage
 import com.example.ptts.features.parent_camera.presentation.ParentCameraUiState
@@ -120,6 +121,7 @@ fun ParentCameraScreen(
             viewModel.onCameraReady()
         },
         onCameraError = viewModel::onCameraError,
+        onRecordingStarted = viewModel::onRecordingStarted,
         onRecordingFinalized = viewModel::onRecordingFinalized,
         onPoseFrame = viewModel::onPoseAnalysisResult,
         modifier = modifier,
@@ -142,6 +144,7 @@ private fun ParentCameraContent(
     onSaveVideo: () -> Unit,
     onControllerReady: (JumpCameraController) -> Unit,
     onCameraError: (Throwable) -> Unit,
+    onRecordingStarted: () -> Unit,
     onRecordingFinalized: (Result<java.io.File>) -> Unit,
     onPoseFrame: (PoseAnalysisResult) -> Unit,
     modifier: Modifier = Modifier,
@@ -155,6 +158,7 @@ private fun ParentCameraContent(
             CameraPreview(
                 onControllerReady = onControllerReady,
                 onCameraError = onCameraError,
+                onRecordingStarted = onRecordingStarted,
                 onRecordingFinalized = onRecordingFinalized,
                 onPoseFrame = onPoseFrame,
             )
@@ -230,6 +234,7 @@ private fun ParentCameraContent(
 private fun CameraPreview(
     onControllerReady: (JumpCameraController) -> Unit,
     onCameraError: (Throwable) -> Unit,
+    onRecordingStarted: () -> Unit,
     onRecordingFinalized: (Result<java.io.File>) -> Unit,
     onPoseFrame: (PoseAnalysisResult) -> Unit,
 ) {
@@ -256,6 +261,7 @@ private fun CameraPreview(
             previewView = previewView,
             analyzer = analyzer,
             onError = onCameraError,
+            onRecordingStarted = onRecordingStarted,
             onRecordingFinalized = onRecordingFinalized,
         )
         controller.start()
@@ -361,10 +367,17 @@ private fun CameraControls(
 
 @Composable
 private fun AnalysisStatusCard(state: ParentCameraUiState) {
-    val guidance = when (state.trackingQuality) {
-        TrackingQuality.Tracking -> stringResource(R.string.parent_camera_analysis_tracking)
-        TrackingQuality.NoPose -> stringResource(R.string.parent_camera_analysis_lost)
-        TrackingQuality.PartialBody -> stringResource(R.string.parent_camera_analysis_waiting)
+    val guidance = when (state.captureQuality.issue) {
+        CaptureQualityIssue.Good -> when (state.trackingQuality) {
+            TrackingQuality.Tracking -> stringResource(R.string.parent_camera_analysis_tracking)
+            TrackingQuality.NoPose -> stringResource(R.string.parent_camera_analysis_lost)
+            TrackingQuality.PartialBody -> stringResource(R.string.parent_camera_analysis_waiting)
+        }
+        CaptureQualityIssue.NoPose -> stringResource(R.string.parent_camera_analysis_lost)
+        CaptureQualityIssue.PartialBody -> stringResource(R.string.parent_camera_analysis_waiting)
+        CaptureQualityIssue.TooFar -> stringResource(R.string.parent_camera_analysis_too_far)
+        CaptureQualityIssue.LowLightOrBlur -> stringResource(R.string.parent_camera_analysis_low_light)
+        CaptureQualityIssue.Shaky -> stringResource(R.string.parent_camera_analysis_shaky)
     }
     Row(
         modifier = Modifier
@@ -386,6 +399,7 @@ private fun AnalysisStatusCard(state: ParentCameraUiState) {
                 R.string.parent_camera_analysis_metrics,
                 state.analysisFps,
                 state.inferenceMs,
+                state.captureQuality.score,
             ),
             color = Color.White.copy(alpha = 0.72f),
             style = MaterialTheme.typography.bodySmall,
@@ -686,6 +700,7 @@ private fun ParentCameraScreenPreview() {
             onSaveVideo = {},
             onControllerReady = { _ -> },
             onCameraError = { _ -> },
+            onRecordingStarted = {},
             onRecordingFinalized = { _ -> },
             onPoseFrame = { _ -> },
         )

@@ -20,6 +20,7 @@ data class ParentCameraUiState(
     val jumpCount: Int = 0,
     val bestRecord: Int = 0,
     val trackingQuality: TrackingQuality = TrackingQuality.NoPose,
+    val captureQuality: CaptureQualityState = CaptureQualityState(),
     val jumpPhase: JumpPhase = JumpPhase.Searching,
     val guidanceText: String = "",
     val analysisFps: Float = 0f,
@@ -33,6 +34,20 @@ data class ParentCameraUiState(
     val isSaving: Boolean = false,
     val saveSuccess: Boolean = false,
 )
+
+data class CaptureQualityState(
+    val score: Int = 0,
+    val issue: CaptureQualityIssue = CaptureQualityIssue.NoPose,
+)
+
+enum class CaptureQualityIssue {
+    Good,
+    NoPose,
+    PartialBody,
+    TooFar,
+    LowLightOrBlur,
+    Shaky,
+}
 
 enum class ParentCameraError {
     PermissionDenied,

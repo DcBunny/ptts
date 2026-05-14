@@ -53,6 +53,7 @@ class VideoOverlayProcessor {
         require(videoTrackIndex >= 0) { "No video track found" }
         videoExtractor.selectTrack(videoTrackIndex)
         val videoFormat = videoExtractor.getTrackFormat(videoTrackIndex)
+        val presentationTimeOffsetUs = videoExtractor.sampleTime.takeIf { it > 0L } ?: 0L
         Log.d(TAG, "video track: index=$videoTrackIndex, format=$videoFormat")
 
         val audioExtractor = MediaExtractor()
@@ -62,7 +63,7 @@ class VideoOverlayProcessor {
         val audioFormat = if (audioTrackIndex >= 0) {
             audioExtractor.selectTrack(audioTrackIndex)
             val format = audioExtractor.getTrackFormat(audioTrackIndex)
-            readAllAudioSamples(audioExtractor, audioSamples)
+            readAllAudioSamples(audioExtractor, audioSamples, presentationTimeOffsetUs)
             Log.d(TAG, "audio pre-read: ${audioSamples.size} samples, format=$format")
             format
         } else {
@@ -99,6 +100,7 @@ class VideoOverlayProcessor {
 
             processInternal(
                 videoExtractor = videoExtractor,
+                presentationTimeOffsetUs = presentationTimeOffsetUs,
                 totalDurationUs = totalDurationUs,
                 audioSamples = audioSamples,
                 audioFormat = audioFormat,
@@ -130,6 +132,7 @@ class VideoOverlayProcessor {
 
     private fun processInternal(
         videoExtractor: MediaExtractor,
+        presentationTimeOffsetUs: Long,
         totalDurationUs: Long,
         audioSamples: List<AudioSample>,
         audioFormat: MediaFormat?,
@@ -215,13 +218,16 @@ class VideoOverlayProcessor {
                             decoder.releaseOutputBuffer(outputBufferIndex, doRender)
 
                             if (doRender) {
+                                val normalizedPresentationTimeUs =
+                                    (decoderBufferInfo.presentationTimeUs - presentationTimeOffsetUs)
+                                        .coerceAtLeast(0L)
                                 outputSurface.awaitNewImage()
                                 outputSurface.updateTexImage()
                                 renderer.drawFrame(
                                     textureTransform = outputSurface.transformMatrix,
-                                    elapsedMs = decoderBufferInfo.presentationTimeUs / 1000L,
+                                    elapsedMs = normalizedPresentationTimeUs / 1000L,
                                 )
-                                inputSurface.setPresentationTime(decoderBufferInfo.presentationTimeUs * 1000L)
+                                inputSurface.setPresentationTime(normalizedPresentationTimeUs * 1000L)
                                 inputSurface.swapBuffers()
                                 framesProcessed++
 
@@ -342,7 +348,11 @@ class VideoOverlayProcessor {
         return -1
     }
 
-    private fun readAllAudioSamples(extractor: MediaExtractor, samples: MutableList<AudioSample>) {
+    private fun readAllAudioSamples(
+        extractor: MediaExtractor,
+        samples: MutableList<AudioSample>,
+        presentationTimeOffsetUs: Long,
+    ) {
         while (true) {
             val buffer = ByteBuffer.allocate(256 * 1024)
             val sampleSize = extractor.readSampleData(buffer, 0)
@@ -353,7 +363,7 @@ class VideoOverlayProcessor {
             val info = MediaCodec.BufferInfo()
             info.offset = 0
             info.size = sampleSize
-            info.presentationTimeUs = extractor.sampleTime
+            info.presentationTimeUs = (extractor.sampleTime - presentationTimeOffsetUs).coerceAtLeast(0L)
             info.flags = extractor.sampleFlags
             samples.add(AudioSample(ByteBuffer.wrap(data), info))
             extractor.advance()

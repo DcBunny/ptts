@@ -24,6 +24,7 @@ class JumpCameraController(
     private val previewView: PreviewView,
     private val analyzer: PoseFrameAnalyzer,
     private val onError: (Throwable) -> Unit,
+    private val onRecordingStarted: () -> Unit,
     private val onRecordingFinalized: (Result<File>) -> Unit,
 ) {
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -63,6 +64,9 @@ class JumpCameraController(
         activeRecording = rec.prepareRecording(context, outputOptions)
             .start(mainExecutor) { event ->
                 when (event) {
+                    is VideoRecordEvent.Start -> {
+                        onRecordingStarted()
+                    }
                     is VideoRecordEvent.Finalize -> {
                         val finalizedFile = pendingVideoFile
                         pendingVideoFile = null

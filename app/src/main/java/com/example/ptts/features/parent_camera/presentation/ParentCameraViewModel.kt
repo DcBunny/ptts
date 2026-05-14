@@ -38,6 +38,7 @@ class ParentCameraViewModel(
     private val jumpCounter = JumpCounter(
         onLog = ::logJumpSession,
     )
+    private val captureQualityAnalyzer = PoseCaptureQualityAnalyzer()
     private val safeDurationSeconds = durationSeconds.coerceAtLeast(JumpSessionDefaults.MinDurationSeconds)
     private val _uiState = MutableStateFlow(
         ParentCameraUiState(
@@ -53,6 +54,7 @@ class ParentCameraViewModel(
     private var analysisFps = 0f
     private var cameraController: JumpCameraController? = null
     private var recordingStartTimeMs = 0L
+    private var isRecordingActive = false
     private val overlayTimeline = mutableListOf<OverlayFrameState>()
 
     init {
@@ -107,6 +109,7 @@ class ParentCameraViewModel(
 
         countdownJob?.cancel()
         recordingJob?.cancel()
+        isRecordingActive = false
         _uiState.update {
             it.copy(
                 stage = ParentCameraStage.Countdown,
@@ -137,6 +140,8 @@ class ParentCameraViewModel(
         countdownJob?.cancel()
         recordingJob?.cancel()
         jumpCounter.reset()
+        captureQualityAnalyzer.reset()
+        isRecordingActive = false
         lastAnalysisFrameMs = 0L
         analysisFps = 0f
         overlayTimeline.clear()
@@ -147,6 +152,7 @@ class ParentCameraViewModel(
                 remainingSeconds = safeDurationSeconds,
                 jumpCount = 0,
                 trackingQuality = TrackingQuality.NoPose,
+                captureQuality = CaptureQualityState(),
                 jumpPhase = JumpPhase.Searching,
                 analysisFps = 0f,
                 inferenceMs = 0L,
@@ -166,16 +172,19 @@ class ParentCameraViewModel(
             TrackingQuality.Tracking
         }
         val fps = updateFps(frame.timestampMs)
+        val captureQuality = captureQualityAnalyzer.analyze(frame)
 
         logJumpSession(
             "onPoseAnalysisResult: stage=${uiState.value.stage} landmarks=$landmarkCount " +
-                "tracking=$trackingQuality fps=${String.format("%.1f", fps)} inferenceMs=${result.inferenceMs}",
+                "tracking=$trackingQuality quality=${captureQuality.issue}/${captureQuality.score} " +
+                "fps=${String.format("%.1f", fps)} inferenceMs=${result.inferenceMs}",
         )
 
-        if (uiState.value.stage != ParentCameraStage.Recording) {
+        if (uiState.value.stage != ParentCameraStage.Recording || !isRecordingActive) {
             _uiState.update { state ->
                 state.copy(
                     trackingQuality = trackingQuality,
+                    captureQuality = captureQuality,
                     poseOverlay = PoseOverlay(
                         points = frame.landmarks.map { (landmark, point) ->
                             PoseOverlayPoint(landmark = landmark, x = point.x, y = point.y)
@@ -186,7 +195,7 @@ class ParentCameraViewModel(
                 )
             }
             logJumpSession(
-                "onPoseAnalysisResult: skipped jump counter because stage=${uiState.value.stage}",
+                "onPoseAnalysisResult: skipped jump counter because stage=${uiState.value.stage} active=$isRecordingActive",
             )
             return
         }
@@ -201,6 +210,7 @@ class ParentCameraViewModel(
             state.copy(
                 jumpCount = counterResult.count,
                 trackingQuality = counterResult.trackingQuality,
+                captureQuality = captureQuality,
                 jumpPhase = counterResult.phase,
                 poseOverlay = PoseOverlay(
                     points = frame.landmarks.map { (landmark, point) ->
@@ -219,9 +229,49 @@ class ParentCameraViewModel(
     private fun beginRecording() {
         logJumpSession("beginRecording: duration=$safeDurationSeconds")
         jumpCounter.reset()
+        captureQualityAnalyzer.reset()
+        lastAnalysisFrameMs = 0L
+        analysisFps = 0f
+        isRecordingActive = false
+        recordingStartTimeMs = 0L
+        overlayTimeline.clear()
+        _uiState.update { state ->
+            state.copy(
+                stage = ParentCameraStage.Recording,
+                countdownValue = null,
+                remainingSeconds = safeDurationSeconds,
+                jumpCount = 0,
+                trackingQuality = TrackingQuality.NoPose,
+                captureQuality = CaptureQualityState(),
+                jumpPhase = JumpPhase.Searching,
+                videoFile = null,
+                isFinalizingVideo = false,
+            )
+        }
+        val started = cameraController?.startRecording() == true
+        if (!started) {
+            _uiState.update { state ->
+                state.copy(
+                    stage = ParentCameraStage.Framing,
+                    errorState = ParentCameraError.CameraUnavailable,
+                )
+            }
+        }
+    }
+
+    fun onRecordingStarted() {
+        if (uiState.value.stage != ParentCameraStage.Recording || isRecordingActive) {
+            logJumpSession("onRecordingStarted: ignored stage=${uiState.value.stage} active=$isRecordingActive")
+            return
+        }
+        logJumpSession("onRecordingStarted")
+        recordingJob?.cancel()
+        jumpCounter.reset()
+        captureQualityAnalyzer.reset()
         lastAnalysisFrameMs = 0L
         analysisFps = 0f
         recordingStartTimeMs = SystemClock.elapsedRealtime()
+        isRecordingActive = true
         overlayTimeline.clear()
         overlayTimeline.add(
             OverlayFrameState(
@@ -230,23 +280,15 @@ class ParentCameraViewModel(
                 jumpCount = 0,
             ),
         )
-        val started = cameraController?.startRecording() == true
-        if (!started) {
-            _uiState.update { state ->
-                state.copy(errorState = ParentCameraError.CameraUnavailable)
-            }
-            return
-        }
         _uiState.update { state ->
             state.copy(
-                stage = ParentCameraStage.Recording,
-                countdownValue = null,
                 remainingSeconds = safeDurationSeconds,
                 jumpCount = 0,
                 trackingQuality = TrackingQuality.NoPose,
+                captureQuality = CaptureQualityState(),
                 jumpPhase = JumpPhase.Searching,
-                videoFile = null,
-                isFinalizingVideo = false,
+                analysisFps = 0f,
+                inferenceMs = 0L,
             )
         }
 
@@ -268,9 +310,10 @@ class ParentCameraViewModel(
     }
 
     private fun finishRecording() {
-        if (uiState.value.stage != ParentCameraStage.Recording) {
+        if (uiState.value.stage != ParentCameraStage.Recording || !isRecordingActive) {
             return
         }
+        isRecordingActive = false
         val finalCount = uiState.value.jumpCount
         overlayTimeline.add(
             OverlayFrameState(
@@ -296,6 +339,7 @@ class ParentCameraViewModel(
     }
 
     fun onRecordingFinalized(result: Result<File>) {
+        isRecordingActive = false
         result.onSuccess { file ->
             logJumpSession("onRecordingFinalized: file=$file size=${file.length()}")
             _uiState.update { state ->
