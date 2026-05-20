@@ -23,6 +23,13 @@ class PoseCaptureQualityAnalyzerTest {
     }
 
     @Test
+    fun moderatelyDistantFullBody_reportsGood() {
+        val result = PoseCaptureQualityAnalyzer().analyze(frame(bodyScale = 0.55f))
+
+        assertEquals(CaptureQualityIssue.Good, result.issue)
+    }
+
+    @Test
     fun lowConfidencePose_reportsLowLightOrBlur() {
         val result = PoseCaptureQualityAnalyzer().analyze(frame(confidence = 0.45f))
 
@@ -37,11 +44,22 @@ class PoseCaptureQualityAnalyzerTest {
     }
 
     @Test
-    fun suddenHorizontalShift_reportsShaky() {
+    fun singleHorizontalShift_doesNotImmediatelyReportShaky() {
         val analyzer = PoseCaptureQualityAnalyzer()
         analyzer.analyze(frame(centerX = 0.50f))
 
         val result = analyzer.analyze(frame(centerX = 0.56f))
+
+        assertEquals(CaptureQualityIssue.Good, result.issue)
+    }
+
+    @Test
+    fun consecutiveHorizontalShifts_reportShaky() {
+        val analyzer = PoseCaptureQualityAnalyzer()
+        analyzer.analyze(frame(centerX = 0.50f))
+        analyzer.analyze(frame(centerX = 0.60f))
+
+        val result = analyzer.analyze(frame(centerX = 0.70f))
 
         assertEquals(CaptureQualityIssue.Shaky, result.issue)
     }

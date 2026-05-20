@@ -652,8 +652,8 @@ private val SkeletonSegments = listOf(
 @Composable
 private fun FocusFrame() {
     Canvas(modifier = Modifier.fillMaxSize()) {
-        val frameWidth = size.width * 0.72f
-        val frameHeight = size.height * 0.68f
+        val frameWidth = size.width * 0.82f
+        val frameHeight = size.height * 0.78f
         val topLeft = Offset(
             x = (size.width - frameWidth) / 2f,
             y = (size.height - frameHeight) / 2f,

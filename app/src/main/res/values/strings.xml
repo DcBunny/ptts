@@ -6,7 +6,7 @@
     <string name="duration">跳绳时长</string>
     <string name="parent_photo">家长拍照</string>
     <string name="parent_photo_hint">进入家长拍照页后即可开始录制</string>
-    <string name="parent_camera_guide">请将跳绳者放在人像框内</string>
+    <string name="parent_camera_guide">请让跳绳者全身清晰入框</string>
     <string name="parent_camera_start">开始记录</string>
     <string name="parent_camera_recording">录制中</string>
     <string name="parent_camera_exit">退出</string>
@@ -20,10 +20,10 @@
     <string name="parent_camera_analysis_tracking">正在实时识别跳绳</string>
     <string name="parent_camera_analysis_waiting">请保持全身入框</string>
     <string name="parent_camera_analysis_lost">暂未识别到完整人体</string>
-    <string name="parent_camera_analysis_too_far">距离稍远，请靠近一些</string>
-    <string name="parent_camera_analysis_edge_clipped">头和脚请离画面边缘一点</string>
+    <string name="parent_camera_analysis_too_far">请让全身清晰入框</string>
+    <string name="parent_camera_analysis_edge_clipped">请调整到全身完整入框</string>
     <string name="parent_camera_analysis_low_light">光线偏暗或画面模糊</string>
-    <string name="parent_camera_analysis_shaky">手机有晃动，请尽量固定</string>
+    <string name="parent_camera_analysis_shaky">画面晃动较明显，请稍微稳住</string>
     <string name="parent_camera_analysis_metrics">识别 %1$.1f FPS · %2$d ms · 质量 %3$d</string>
     <string name="parent_camera_summary_title">本次成绩</string>
     <string name="parent_camera_summary_score">成绩</string>

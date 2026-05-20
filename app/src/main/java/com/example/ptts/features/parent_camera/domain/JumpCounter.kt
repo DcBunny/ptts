@@ -23,6 +23,7 @@ class JumpCounter(
     private var averageCycleMs: Float? = null
     private var adaptivePeakLift: Float? = null
     private var stableSinceMs: Long? = null
+    private var recoveringSinceMs: Long? = null
 
     fun reset() {
         count = 0
@@ -42,6 +43,7 @@ class JumpCounter(
         averageCycleMs = null
         adaptivePeakLift = null
         stableSinceMs = null
+        recoveringSinceMs = null
         log("计数器已重置")
     }
 
@@ -57,6 +59,8 @@ class JumpCounter(
         updateStableScale(sample)
 
         val stableForMs = updateStableWindow(frame.timestampMs, sample.quality)
+        val recovering = recoveringSinceMs != null
+        val requiredStableMs = if (recovering) RecoveryStableBeforeCountingMs else MinStableBeforeCountingMs
         val bodyBaseline = baselineBodyY
         val footBaseline = baselineFootY
         if (bodyBaseline == null && footBaseline == null) {
@@ -68,6 +72,7 @@ class JumpCounter(
             previousLift = 0f
             previousSampleMs = frame.timestampMs
             stableSinceMs = frame.timestampMs - MinStableBeforeCountingMs
+            recoveringSinceMs = null
             log(
                 "建立基线: body=${sample.bodyY?.fmt} foot=${sample.footY?.fmt} " +
                     "scale=${sample.scale.fmt} quality=${sample.quality}",
@@ -92,10 +97,14 @@ class JumpCounter(
                 "velocity=${velocity.fmt} quality=${sample.quality}",
         )
 
-        val newPhase = if (stableForMs < MinStableBeforeCountingMs) {
-            updateGroundBaseline(sample, filteredLift, allowFastUpdate = stableForMs < MinStableBeforeCountingMs)
+        val newPhase = if (stableForMs < requiredStableMs) {
+            updateGroundBaseline(sample, filteredLift, allowFastUpdate = true)
             JumpPhase.Grounded
         } else {
+            if (recovering) {
+                recoveringSinceMs = null
+                log("姿态恢复稳定: stableFor=${stableForMs}ms")
+            }
             nextPhase(
                 timestampMs = frame.timestampMs,
                 sample = sample,
@@ -213,6 +222,7 @@ class JumpCounter(
 
     private fun handleLostFrame(timestampMs: Long) {
         val lostMs = if (lastValidMs == 0L) 0L else timestampMs - lastValidMs
+        resetJumpTracking()
         stableSinceMs = null
         smoothedLift = null
         previousLift = null
@@ -222,8 +232,10 @@ class JumpCounter(
             baselineBodyY = null
             baselineFootY = null
             phase = JumpPhase.Searching
-            resetJumpTracking()
+            recoveringSinceMs = null
         } else {
+            phase = JumpPhase.Grounded
+            recoveringSinceMs = recoveringSinceMs ?: timestampMs
             log("帧丢弃: timestamp=$timestampMs, 已丢失=${lostMs}ms")
         }
     }
@@ -665,13 +677,14 @@ class JumpCounter(
         const val MinWeakAirTimeMs = 105L
         const val BaseRefractoryMs = 160L
         const val MinAdaptiveRefractoryMs = 120L
-        const val MaxLostPoseMs = 750L
+        const val MaxLostPoseMs = 1500L
         const val MaxRisingMs = 300L
         const val MaxAirborneMs = 800L
         const val MaxJumpDurationMs = 900L
         const val MinStandardJumpSamples = 2
         const val MinWeakJumpSamples = 2
         const val MinStableBeforeCountingMs = 300L
+        const val RecoveryStableBeforeCountingMs = 150L
         const val MinCycleMs = 180L
         const val MaxCycleMs = 900L
 
@@ -697,7 +710,7 @@ class JumpCounter(
         const val ScaleSmoothing = 0.12f
         const val GroundedBaselineSmoothing = 0.06f
         const val AirborneBaselineSmoothing = 0.006f
-        const val RecoveryBaselineSmoothing = 0.22f
+        const val RecoveryBaselineSmoothing = 0.45f
         const val CadenceSmoothing = 0.24f
         const val AdaptivePeakSmoothing = 0.18f
         const val LearnedWeakPeakRatio = 0.58f

@@ -478,6 +478,105 @@ class JumpCounterTest {
     }
 
     @Test
+    fun repositionAfterManyCounts_recoversAndContinuesCounting() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+        var cycleStartMs = 80L
+
+        repeat(55) {
+            result = counter.accept(frame(timestampMs = cycleStartMs, footY = GroundFootY - 0.055f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 50L, footY = GroundFootY - 0.075f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 120L, footY = GroundFootY - 0.015f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 160L, footY = GroundFootY))
+            cycleStartMs += 300L
+        }
+        assertEquals(55, result.count)
+
+        result = counter.accept(PoseFrame(timestampMs = cycleStartMs, landmarks = emptyMap()))
+        result = counter.accept(PoseFrame(timestampMs = cycleStartMs + 80L, landmarks = emptyMap()))
+
+        val shiftedGroundY = GroundFootY - 0.060f
+        repeat(5) { index ->
+            result = counter.accept(
+                frame(
+                    timestampMs = cycleStartMs + 160L + index * 50L,
+                    footY = shiftedGroundY,
+                    bodyScale = 0.82f,
+                    baseGroundY = shiftedGroundY,
+                    centerX = 0.57f,
+                ),
+            )
+        }
+
+        cycleStartMs += 520L
+        repeat(10) {
+            result = counter.accept(
+                frame(
+                    timestampMs = cycleStartMs,
+                    footY = shiftedGroundY - 0.045f,
+                    bodyScale = 0.82f,
+                    baseGroundY = shiftedGroundY,
+                    centerX = 0.57f,
+                ),
+            )
+            result = counter.accept(
+                frame(
+                    timestampMs = cycleStartMs + 55L,
+                    footY = shiftedGroundY - 0.060f,
+                    bodyScale = 0.82f,
+                    baseGroundY = shiftedGroundY,
+                    centerX = 0.57f,
+                ),
+            )
+            result = counter.accept(
+                frame(
+                    timestampMs = cycleStartMs + 130L,
+                    footY = shiftedGroundY - 0.010f,
+                    bodyScale = 0.82f,
+                    baseGroundY = shiftedGroundY,
+                    centerX = 0.57f,
+                ),
+            )
+            result = counter.accept(
+                frame(
+                    timestampMs = cycleStartMs + 180L,
+                    footY = shiftedGroundY,
+                    bodyScale = 0.82f,
+                    baseGroundY = shiftedGroundY,
+                    centerX = 0.57f,
+                ),
+            )
+            cycleStartMs += 330L
+        }
+
+        assertEquals(65, result.count)
+    }
+
+    @Test
+    fun shortPoseLoss_recoversQuicklyWithoutGhostCounts() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+
+        result = counter.accept(frame(timestampMs = 100L, footY = GroundFootY - 0.060f))
+        result = counter.accept(frame(timestampMs = 165L, footY = GroundFootY - 0.072f))
+        result = counter.accept(frame(timestampMs = 235L, footY = GroundFootY))
+        assertEquals(1, result.count)
+
+        result = counter.accept(PoseFrame(timestampMs = 520L, landmarks = emptyMap()))
+        result = counter.accept(frame(timestampMs = 600L, footY = GroundFootY))
+        result = counter.accept(frame(timestampMs = 680L, footY = GroundFootY))
+        result = counter.accept(frame(timestampMs = 760L, footY = GroundFootY))
+        assertEquals(1, result.count)
+
+        result = counter.accept(frame(timestampMs = 900L, footY = GroundFootY - 0.055f))
+        result = counter.accept(frame(timestampMs = 960L, footY = GroundFootY - 0.070f))
+        result = counter.accept(frame(timestampMs = 1035L, footY = GroundFootY - 0.010f))
+        result = counter.accept(frame(timestampMs = 1080L, footY = GroundFootY))
+
+        assertEquals(2, result.count)
+    }
+
+    @Test
     fun slowBodyFloat_doesNotCountAsJumping() {
         val counter = JumpCounter()
         var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
@@ -545,28 +644,30 @@ class JumpCounterTest {
         includeRightFoot: Boolean = true,
         bodyOffsetY: Float = 0f,
         bodyScale: Float = 1f,
+        baseGroundY: Float = GroundFootY,
+        centerX: Float = 0.50f,
     ): PoseFrame {
         val landmarks = mutableMapOf<BodyLandmark, PosePoint>()
-        val hipY = GroundFootY - 0.35f * bodyScale + bodyOffsetY
+        val hipY = baseGroundY - 0.35f * bodyScale + bodyOffsetY
         val shoulderY = hipY - 0.27f * bodyScale
-        val kneeY = GroundFootY - 0.18f * bodyScale + bodyOffsetY
+        val kneeY = baseGroundY - 0.18f * bodyScale + bodyOffsetY
         if (includeTorso) {
-            landmarks[BodyLandmark.LeftShoulder] = point(0.42f, shoulderY, confidence)
-            landmarks[BodyLandmark.RightShoulder] = point(0.58f, shoulderY, confidence)
-            landmarks[BodyLandmark.LeftHip] = point(0.44f, hipY, confidence)
-            landmarks[BodyLandmark.RightHip] = point(0.56f, hipY, confidence)
+            landmarks[BodyLandmark.LeftShoulder] = point(centerX - 0.08f, shoulderY, confidence)
+            landmarks[BodyLandmark.RightShoulder] = point(centerX + 0.08f, shoulderY, confidence)
+            landmarks[BodyLandmark.LeftHip] = point(centerX - 0.06f, hipY, confidence)
+            landmarks[BodyLandmark.RightHip] = point(centerX + 0.06f, hipY, confidence)
         }
         if (includeKnees) {
-            landmarks[BodyLandmark.LeftKnee] = point(0.45f, kneeY, confidence)
-            landmarks[BodyLandmark.RightKnee] = point(0.55f, kneeY, confidence)
+            landmarks[BodyLandmark.LeftKnee] = point(centerX - 0.05f, kneeY, confidence)
+            landmarks[BodyLandmark.RightKnee] = point(centerX + 0.05f, kneeY, confidence)
         }
         if (includeLeftFoot) {
-            landmarks[BodyLandmark.LeftAnkle] = point(0.46f, leftFootY, leftAnkleConfidence)
-            landmarks[BodyLandmark.LeftHeel] = point(0.45f, leftFootY, leftHeelConfidence)
+            landmarks[BodyLandmark.LeftAnkle] = point(centerX - 0.04f, leftFootY, leftAnkleConfidence)
+            landmarks[BodyLandmark.LeftHeel] = point(centerX - 0.05f, leftFootY, leftHeelConfidence)
         }
         if (includeRightFoot) {
-            landmarks[BodyLandmark.RightAnkle] = point(0.54f, rightFootY, rightAnkleConfidence)
-            landmarks[BodyLandmark.RightHeel] = point(0.55f, rightFootY, rightHeelConfidence)
+            landmarks[BodyLandmark.RightAnkle] = point(centerX + 0.04f, rightFootY, rightAnkleConfidence)
+            landmarks[BodyLandmark.RightHeel] = point(centerX + 0.05f, rightFootY, rightHeelConfidence)
         }
         return PoseFrame(timestampMs = timestampMs, landmarks = landmarks)
     }

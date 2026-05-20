@@ -6,9 +6,11 @@ import kotlin.math.abs
 
 class PoseCaptureQualityAnalyzer {
     private var previousBounds: PoseBounds? = null
+    private var consecutiveShakyFrames = 0
 
     fun reset() {
         previousBounds = null
+        consecutiveShakyFrames = 0
     }
 
     fun analyze(frame: PoseFrame): CaptureQualityState {
@@ -48,6 +50,11 @@ class PoseCaptureQualityAnalyzer {
             issue = CaptureQualityIssue.LowLightOrBlur
         }
         if (bounds.isLikelyShakyComparedTo(previousBounds)) {
+            consecutiveShakyFrames += 1
+        } else {
+            consecutiveShakyFrames = 0
+        }
+        if (consecutiveShakyFrames >= MinConsecutiveShakyFrames) {
             score -= 24
             issue = CaptureQualityIssue.Shaky
         }
@@ -110,10 +117,11 @@ class PoseCaptureQualityAnalyzer {
         const val MinAverageConfidence = 0.55f
         const val MinBoundsPoints = 5
         const val MinVisibleRequiredPoints = 6
-        const val MinPersonHeight = 0.40f
+        const val MinPersonHeight = 0.33f
         const val EdgeMargin = 0.04f
-        const val MaxNormalizedHorizontalShake = 0.055f
-        const val MaxNormalizedScaleShake = 0.12f
+        const val MaxNormalizedHorizontalShake = 0.095f
+        const val MaxNormalizedScaleShake = 0.18f
+        const val MinConsecutiveShakyFrames = 2
 
         val RequiredLandmarks = listOf(
             BodyLandmark.LeftShoulder,
