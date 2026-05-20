@@ -55,6 +55,7 @@ class ParentCameraViewModel(
     private var cameraController: JumpCameraController? = null
     private var recordingStartTimeMs = 0L
     private var isRecordingActive = false
+    private var videoProcessingJob: Job? = null
     private val overlayTimeline = mutableListOf<OverlayFrameState>()
 
     init {
@@ -109,6 +110,7 @@ class ParentCameraViewModel(
 
         countdownJob?.cancel()
         recordingJob?.cancel()
+        videoProcessingJob?.cancel()
         isRecordingActive = false
         _uiState.update {
             it.copy(
@@ -139,6 +141,7 @@ class ParentCameraViewModel(
         logJumpSession("retry")
         countdownJob?.cancel()
         recordingJob?.cancel()
+        videoProcessingJob?.cancel()
         jumpCounter.reset()
         captureQualityAnalyzer.reset()
         isRecordingActive = false
@@ -342,12 +345,31 @@ class ParentCameraViewModel(
         isRecordingActive = false
         result.onSuccess { file ->
             logJumpSession("onRecordingFinalized: file=$file size=${file.length()}")
-            _uiState.update { state ->
-                state.copy(
-                    videoFile = file,
-                    isFinalizingVideo = false,
-                    errorState = null,
-                )
+            videoProcessingJob?.cancel()
+            videoProcessingJob = viewModelScope.launch {
+                val processedResult = runCatching {
+                    processVideoWithOverlay(file, overlayTimeline.toList())
+                }
+                processedResult.onSuccess { processedFile ->
+                    file.delete()
+                    _uiState.update { state ->
+                        state.copy(
+                            videoFile = processedFile,
+                            isFinalizingVideo = false,
+                            errorState = null,
+                        )
+                    }
+                }.onFailure { error ->
+                    logJumpSession("processVideoWithOverlay failed: ${error.message}")
+                    _uiState.update { state ->
+                        state.copy(
+                            videoFile = null,
+                            isFinalizingVideo = false,
+                            errorState = ParentCameraError.CameraUnavailable,
+                        )
+                    }
+                    Toast.makeText(getApplication(), "成绩视频生成失败", Toast.LENGTH_SHORT).show()
+                }
             }
         }.onFailure { error ->
             logJumpSession("onRecordingFinalized failed: ${error.message}")
@@ -361,30 +383,10 @@ class ParentCameraViewModel(
         }
     }
 
-    fun saveVideoToGallery() {
-        val file = uiState.value.videoFile ?: return
-        _uiState.update { it.copy(isSaving = true) }
-        viewModelScope.launch {
-            val processResult = runCatching {
-                val context = getApplication<Application>()
-                val processedFile = processVideoWithOverlay(file)
-                saveToMediaStore(context, processedFile)
-                processedFile.delete()
-                file.delete()
-            }
-            processResult.onSuccess {
-                _uiState.update { it.copy(isSaving = false, saveSuccess = true, videoFile = null) }
-                Toast.makeText(getApplication(), "视频已保存到相册", Toast.LENGTH_SHORT).show()
-            }.onFailure { error ->
-                logJumpSession("saveVideoToGallery failed: ${error.message}")
-                _uiState.update { it.copy(isSaving = false) }
-                Toast.makeText(getApplication(), "保存失败", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    private suspend fun processVideoWithOverlay(inputFile: File): File {
-        val timelineSnapshot = overlayTimeline.toList()
+    private suspend fun processVideoWithOverlay(
+        inputFile: File,
+        timelineSnapshot: List<OverlayFrameState>,
+    ): File {
         require(timelineSnapshot.isNotEmpty()) { "Missing overlay timeline" }
         logJumpSession("processVideoWithOverlay: starting, metadata=${timelineSnapshot.size}, input=${inputFile.length()} bytes")
         return withContext(Dispatchers.Default) {
@@ -402,6 +404,26 @@ class ParentCameraViewModel(
         }
     }
 
+    fun saveVideoToGallery() {
+        val file = uiState.value.videoFile ?: return
+        _uiState.update { it.copy(isSaving = true) }
+        viewModelScope.launch {
+            val processResult = runCatching {
+                val context = getApplication<Application>()
+                saveToMediaStore(context, file)
+                file.delete()
+            }
+            processResult.onSuccess {
+                _uiState.update { it.copy(isSaving = false, saveSuccess = true, videoFile = null) }
+                Toast.makeText(getApplication(), "视频已保存到相册", Toast.LENGTH_SHORT).show()
+            }.onFailure { error ->
+                logJumpSession("saveVideoToGallery failed: ${error.message}")
+                _uiState.update { it.copy(isSaving = false) }
+                Toast.makeText(getApplication(), "保存失败", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     private fun appendOverlayState(elapsedMs: Long) {
         val state = uiState.value
         val remaining = (safeDurationSeconds - (elapsedMs / 1000)).toInt().coerceAtLeast(0)
@@ -415,7 +437,7 @@ class ParentCameraViewModel(
         }
     }
 
-    private fun saveToMediaStore(context: android.content.Context, file: File) {
+    private suspend fun saveToMediaStore(context: android.content.Context, file: File) = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver
         val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
@@ -431,15 +453,20 @@ class ParentCameraViewModel(
         }
         val uri = resolver.insert(collection, values)
             ?: throw RuntimeException("Failed to create MediaStore entry")
-        resolver.openOutputStream(uri)?.use { output ->
-            file.inputStream().use { input ->
-                input.copyTo(output)
+        try {
+            resolver.openOutputStream(uri)?.use { output ->
+                file.inputStream().use { input ->
+                    input.copyTo(output)
+                }
+            } ?: throw RuntimeException("Failed to open MediaStore output stream")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                values.clear()
+                values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
             }
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            values.clear()
-            values.put(MediaStore.Video.Media.IS_PENDING, 0)
-            resolver.update(uri, values, null, null)
+        } catch (error: Throwable) {
+            resolver.delete(uri, null, null)
+            throw error
         }
     }
 

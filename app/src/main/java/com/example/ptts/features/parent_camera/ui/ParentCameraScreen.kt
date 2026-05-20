@@ -182,6 +182,7 @@ private fun ParentCameraContent(
 
         if (state.stage == ParentCameraStage.Recording) {
             PoseOverlayCanvas(overlay = state.poseOverlay)
+            FocusFrame()
         } else if (state.stage != ParentCameraStage.Summary) {
             FocusFrame()
         }
