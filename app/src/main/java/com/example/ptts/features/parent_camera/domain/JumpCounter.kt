@@ -36,6 +36,8 @@ class JumpCounter(
     private var stableSinceMs: Long? = null
     private var recoveringSinceMs: Long? = null
     private var suspendedAfterLoss = false
+    private var cameraRecoveryPending = false
+    private var cameraStableSinceMs: Long? = null
     private var jumpHasPairedEvidence = false
 
     private var calibrationBodyY: Float? = null
@@ -120,6 +122,8 @@ class JumpCounter(
         stableSinceMs = null
         recoveringSinceMs = null
         suspendedAfterLoss = false
+        cameraRecoveryPending = false
+        cameraStableSinceMs = null
         jumpHasPairedEvidence = false
     }
 
@@ -130,14 +134,32 @@ class JumpCounter(
             return result(TrackingQuality.PartialBody, countedThisFrame = false)
         }
         lastInputMs = frame.timestampMs
+        val cameraUnstable = frame.cameraMotion.available && !frame.cameraMotion.reliable &&
+            frame.cameraMotion.magnitude >= CameraMotionRecoveryThreshold
+        if (cameraUnstable) {
+            cameraRecoveryPending = true
+            cameraStableSinceMs = null
+            resetJumpTracking()
+            phase = JumpPhase.Grounded
+            recoveringSinceMs = frame.timestampMs
+        }
         val sample = frame.toSample()
         if (sample == null || sample.quality == SampleQuality.Unusable) {
+            cameraStableSinceMs = null
             val estimated = handleLostFrame(frame.timestampMs)
             return result(
                 TrackingQuality.PartialBody,
                 countedThisFrame = false,
                 estimatedThisFrame = estimated,
             )
+        }
+
+        if (cameraRecoveryPending) {
+            if (lastValidMs?.let { frame.timestampMs - it > MaxTransientLostMs } == true) {
+                cameraStableSinceMs = null
+            }
+            lastValidMs = frame.timestampMs
+            return recoverAfterCameraMotion(frame.timestampMs, sample, cameraUnstable)
         }
 
         val gapSinceValid = lastValidMs?.let { frame.timestampMs - it } ?: 0L
@@ -148,16 +170,8 @@ class JumpCounter(
         }
 
         lastValidMs = frame.timestampMs
-        val wasRecovering = recoveringSinceMs != null ||
-            (frame.cameraMotion.available && !frame.cameraMotion.reliable &&
-                frame.cameraMotion.magnitude >= CameraMotionRecoveryThreshold)
+        val wasRecovering = recoveringSinceMs != null
         updateStableScale(sample)
-
-        if (frame.cameraMotion.available && !frame.cameraMotion.reliable &&
-            frame.cameraMotion.magnitude >= CameraMotionRecoveryThreshold
-        ) {
-            recoveringSinceMs = recoveringSinceMs ?: frame.timestampMs
-        }
 
         val stableForMs = updateStableWindow(frame.timestampMs, sample.quality)
         val recovering = recoveringSinceMs != null
@@ -197,7 +211,7 @@ class JumpCounter(
             }
             baselineBodyY = sample.bodyY ?: baselineBodyY
             baselineFootY = sample.footY ?: baselineFootY
-            stableSinceMs = frame.timestampMs
+            stableSinceMs = frame.timestampMs - MinStableBeforeCountingMs
             smoothedLift = 0f
             previousLift = 0f
             previousSampleMs = frame.timestampMs
@@ -283,6 +297,44 @@ class JumpCounter(
         }
 
         return result(sample.trackingQuality, counted, recovering = recoveringSinceMs != null)
+    }
+
+    private fun recoverAfterCameraMotion(
+        timestampMs: Long,
+        sample: PoseSample,
+        cameraUnstable: Boolean,
+    ): JumpCounterResult {
+        // 移动期间丢弃旧跳跃；稳定窗口内取最低站位，避免将腾空位置当作地面。
+        val firstStableSample = cameraStableSinceMs == null
+        baselineBodyY = sample.bodyY?.let {
+            if (cameraUnstable || firstStableSample) it else maxOf(baselineBodyY ?: it, it)
+        }
+        baselineFootY = sample.footY?.let {
+            if (cameraUnstable || firstStableSample) it else maxOf(baselineFootY ?: it, it)
+        }
+        lastStableScale = sample.scale
+        resetJumpTracking()
+        previousSampleMs = null
+        phase = JumpPhase.Grounded
+        phaseStartMs = timestampMs
+        estimateWindowStartMs = null
+        estimatedInCurrentGap = 0
+        suspendedAfterLoss = false
+        if (!cameraUnstable) {
+            val stableStart = cameraStableSinceMs ?: timestampMs.also { cameraStableSinceMs = it }
+            if (timestampMs - stableStart >= RecoveryStableBeforeCountingMs) {
+                cameraRecoveryPending = false
+                cameraStableSinceMs = null
+                recoveringSinceMs = null
+                // 稳定窗口已完成，下一帧直接检测起跳，不再叠加启动等待。
+                stableSinceMs = timestampMs - MinStableBeforeCountingMs
+                smoothedLift = sample.toFeatures(baselineBodyY, baselineFootY).combinedLift
+                previousLift = smoothedLift
+                previousSampleMs = timestampMs
+                lastFilterMs = timestampMs
+            }
+        }
+        return result(sample.trackingQuality, countedThisFrame = false, recovering = cameraRecoveryPending)
     }
 
     private fun nextPhase(
@@ -720,7 +772,8 @@ class JumpCounter(
 
     private fun PoseFrame.correctedLandmarks(): Map<BodyLandmark, PosePoint> {
         val motion = cameraMotion
-        if (!motion.available || !motion.reliable) return landmarks
+        // offset 是累计的已确认位移；匹配暂时失败时仍保留，防止坐标系来回切换。
+        if (!motion.available) return landmarks
         return landmarks.mapValues { (_, point) ->
             point.copy(
                 x = point.x - motion.offsetX,

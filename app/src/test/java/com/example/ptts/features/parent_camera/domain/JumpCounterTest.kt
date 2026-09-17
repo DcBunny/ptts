@@ -692,6 +692,84 @@ class JumpCounterTest {
         assertEquals(0, result.estimatedCount)
     }
 
+    @Test
+    fun cameraMoveDuringJump_recoversWithinStableWindowAndCountsNextJump() {
+        for (shift in listOf(-0.12f, 0.08f)) {
+            val counter = JumpCounter()
+            counter.accept(frame(0L))
+            counter.accept(frame(100L, footY = GroundFootY - 0.06f))
+            counter.accept(frame(165L, footY = GroundFootY - 0.075f))
+            val ground = GroundFootY + shift
+            val moving = frame(200L, footY = ground, baseGroundY = ground).copy(
+                cameraMotion = CameraMotion(available = true, magnitude = 0.08f),
+            )
+            val interrupted = counter.accept(moving)
+            assertTrue(interrupted.recovering)
+            assertEquals(0, interrupted.count)
+            // 连续移动不能被误当作已经稳定，也不能保留移动前的腾空候选。
+            assertTrue(counter.accept(moving.copy(timestampMs = 400L)).recovering)
+            for (time in listOf(450L, 500L, 550L)) {
+                val recovering = counter.accept(frame(time, footY = ground, baseGroundY = ground))
+                assertTrue(recovering.recovering)
+                assertEquals(0, recovering.count)
+            }
+            assertFalse(counter.accept(frame(600L, footY = ground, baseGroundY = ground)).recovering)
+            counter.accept(frame(650L, footY = ground - 0.055f, baseGroundY = ground))
+            counter.accept(frame(705L, footY = ground - 0.075f, baseGroundY = ground))
+            counter.accept(frame(780L, footY = ground - 0.010f, baseGroundY = ground))
+            val landed = counter.accept(frame(830L, footY = ground, baseGroundY = ground))
+            assertEquals(1, landed.confirmedCount)
+        }
+    }
+
+    @Test
+    fun cameraRecovery_poseLossRestartsStableWindow() {
+        val counter = JumpCounter()
+        counter.accept(frame(0L))
+        counter.accept(frame(100L).copy(
+            cameraMotion = CameraMotion(available = true, magnitude = 0.08f),
+        ))
+        assertTrue(counter.accept(frame(150L)).recovering)
+        counter.accept(PoseFrame(200L, emptyMap()))
+        assertTrue(counter.accept(frame(250L)).recovering)
+        assertTrue(counter.accept(frame(350L)).recovering)
+        assertFalse(counter.accept(frame(400L)).recovering)
+        assertEquals(0, counter.accept(frame(450L)).count)
+    }
+
+    @Test
+    fun groundedPoseRecovery_countsNextJumpWithoutStartupDelay() {
+        val counter = JumpCounter()
+        counter.accept(frame(0L))
+        counter.accept(PoseFrame(200L, emptyMap()))
+        counter.accept(frame(250L))
+        counter.accept(frame(300L, footY = GroundFootY - 0.055f))
+        counter.accept(frame(355L, footY = GroundFootY - 0.075f))
+        counter.accept(frame(430L, footY = GroundFootY - 0.010f))
+        assertEquals(1, counter.accept(frame(480L)).count)
+    }
+
+    @Test
+    fun unreliableMotion_keepsAccumulatedCompensationWithoutGhostJump() {
+        val counter = JumpCounter()
+        val motion = CameraMotion(offsetY = 0.1f, available = true, reliable = true)
+        val standing = frame(0L).let { pose ->
+            pose.copy(
+                landmarks = pose.landmarks.mapValues { (_, point) -> point.copy(y = point.y + 0.1f) },
+                cameraMotion = motion,
+            )
+        }
+        counter.accept(standing)
+        for (index in 1..20) {
+            val result = counter.accept(standing.copy(
+                timestampMs = index * 50L,
+                cameraMotion = motion.copy(reliable = index % 4 < 2),
+            ))
+            assertEquals(0, result.count)
+            assertEquals(JumpPhase.Grounded, result.phase)
+        }
+    }
+
     private fun runStandardJumps(
         jumps: Int,
         cycleSpacingMs: Long = 300L,
