@@ -41,7 +41,19 @@ class JumpSessionDiagnosticRecorder(
                     .append('\t')
                     .append(event.recovering.toString())
                     .append('\t')
-                    .appendLine(event.event)
+                    .append(event.event)
+                    .append('\t')
+                    .append(event.sampleIntervalMs?.toString() ?: "")
+                    .append('\t')
+                    .append(event.rawLift?.toString() ?: "")
+                    .append('\t')
+                    .append(event.smoothedLift?.toString() ?: "")
+                    .append('\t')
+                    .append(event.peakLift?.toString() ?: "")
+                    .append('\t')
+                    .append(event.jumpDurationMs?.toString() ?: "")
+                    .append('\t')
+                    .appendLine(event.rejectionReason ?: "")
             }
         }
     }

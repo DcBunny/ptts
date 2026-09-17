@@ -23,6 +23,7 @@ class JumpCounter(
     private var lastStableScale: Float? = null
     private var smoothedLift: Float? = null
     private var previousLift: Float? = null
+    private var previousRawLift: Float? = null
     private var previousSampleMs: Long? = null
     private var lastFilterMs: Long? = null
     private var averageCycleMs: Float? = null
@@ -39,6 +40,16 @@ class JumpCounter(
     private var cameraRecoveryPending = false
     private var cameraStableSinceMs: Long? = null
     private var jumpHasPairedEvidence = false
+
+    // Per-frame values retained for the bounded diagnostic stream. These are
+    // deliberately reset at the beginning of each accepted frame so a lost
+    // pose cannot make an old lift look like current evidence.
+    private var diagnosticSampleIntervalMs: Long? = null
+    private var diagnosticRawLift: Float? = null
+    private var diagnosticSmoothedLift: Float? = null
+    private var diagnosticPeakLift: Float? = null
+    private var diagnosticJumpDurationMs: Long? = null
+    private var diagnosticRejectionReason: String? = null
 
     private var calibrationBodyY: Float? = null
     private var calibrationFootY: Float? = null
@@ -109,6 +120,7 @@ class JumpCounter(
         lastStableScale = null
         smoothedLift = null
         previousLift = null
+        previousRawLift = null
         previousSampleMs = null
         lastFilterMs = null
         averageCycleMs = null
@@ -125,14 +137,32 @@ class JumpCounter(
         cameraRecoveryPending = false
         cameraStableSinceMs = null
         jumpHasPairedEvidence = false
+        diagnosticSampleIntervalMs = null
+        diagnosticRawLift = null
+        diagnosticSmoothedLift = null
+        diagnosticPeakLift = null
+        diagnosticJumpDurationMs = null
+        diagnosticRejectionReason = null
     }
 
     fun accept(frame: PoseFrame): JumpCounterResult {
         log("accept: timestamp=${frame.timestampMs} landmarks=${frame.landmarks.size}")
         if (lastInputMs != null && frame.timestampMs <= lastInputMs!!) {
             log("忽略重复或倒序时间戳: ${frame.timestampMs}")
+            diagnosticSampleIntervalMs = null
+            diagnosticRawLift = null
+            diagnosticSmoothedLift = null
+            diagnosticPeakLift = null
+            diagnosticJumpDurationMs = null
+            diagnosticRejectionReason = null
             return result(TrackingQuality.PartialBody, countedThisFrame = false)
         }
+        diagnosticSampleIntervalMs = lastInputMs?.let { frame.timestampMs - it }
+        diagnosticRawLift = null
+        diagnosticSmoothedLift = null
+        diagnosticPeakLift = null
+        diagnosticJumpDurationMs = null
+        diagnosticRejectionReason = null
         lastInputMs = frame.timestampMs
         val cameraUnstable = frame.cameraMotion.available && !frame.cameraMotion.reliable &&
             frame.cameraMotion.magnitude >= CameraMotionRecoveryThreshold
@@ -185,6 +215,7 @@ class JumpCounter(
             phaseStartMs = frame.timestampMs
             smoothedLift = 0f
             previousLift = 0f
+            previousRawLift = 0f
             previousSampleMs = frame.timestampMs
             lastFilterMs = frame.timestampMs
             stableSinceMs = frame.timestampMs - MinStableBeforeCountingMs
@@ -214,6 +245,7 @@ class JumpCounter(
             stableSinceMs = frame.timestampMs - MinStableBeforeCountingMs
             smoothedLift = 0f
             previousLift = 0f
+            previousRawLift = 0f
             previousSampleMs = frame.timestampMs
             lastFilterMs = frame.timestampMs
             suspendedAfterLoss = false
@@ -232,7 +264,9 @@ class JumpCounter(
             bodyBaseline = bodyBaseline,
             footBaseline = footBaseline,
         )
+        diagnosticRawLift = features.combinedLift
         val filteredLift = filterLift(features.combinedLift, frame.timestampMs)
+        diagnosticSmoothedLift = filteredLift
         val landingLift = minOf(filteredLift, features.combinedLift)
         val velocity = if (suspendedAfterLoss) 0f else velocityPerSecond(frame.timestampMs, filteredLift)
         val thresholds = thresholds()
@@ -258,11 +292,12 @@ class JumpCounter(
                 timestampMs = frame.timestampMs,
                 sample = sample,
                 lift = filteredLift,
+                rawLift = features.combinedLift,
                 triggerLift = maxOf(filteredLift, features.combinedLift),
                 landingLift = landingLift,
                 velocity = velocity,
                 thresholds = thresholds,
-                pairedEvidence = features.bodyLift != null && features.footLift != null,
+                pairedEvidence = hasPairedLiftEvidence(features),
                 onCount = { reason ->
                     counted = maybeCountLanding(
                         timestampMs = frame.timestampMs,
@@ -281,6 +316,7 @@ class JumpCounter(
         }
         phase = newPhase
         previousLift = filteredLift
+        previousRawLift = features.combinedLift
         previousSampleMs = frame.timestampMs
         suspendedAfterLoss = false
         if (wasRecovering) {
@@ -315,6 +351,7 @@ class JumpCounter(
         lastStableScale = sample.scale
         resetJumpTracking()
         previousSampleMs = null
+        previousRawLift = null
         phase = JumpPhase.Grounded
         phaseStartMs = timestampMs
         estimateWindowStartMs = null
@@ -330,6 +367,7 @@ class JumpCounter(
                 stableSinceMs = timestampMs - MinStableBeforeCountingMs
                 smoothedLift = sample.toFeatures(baselineBodyY, baselineFootY).combinedLift
                 previousLift = smoothedLift
+                previousRawLift = smoothedLift
                 previousSampleMs = timestampMs
                 lastFilterMs = timestampMs
             }
@@ -341,6 +379,7 @@ class JumpCounter(
         timestampMs: Long,
         sample: PoseSample,
         lift: Float,
+        rawLift: Float,
         triggerLift: Float,
         landingLift: Float,
         velocity: Float,
@@ -351,41 +390,60 @@ class JumpCounter(
         return when (phase) {
             JumpPhase.Searching -> JumpPhase.Grounded
             JumpPhase.Grounded -> {
-                updateGroundBaseline(sample, lift, allowFastUpdate = false)
                 if (triggerLift >= thresholds.rising && velocity >= MinRisingVelocity) {
-                    jumpStartMs = timestampMs
-                    jumpMaxLift = triggerLift
+                    jumpStartMs = estimateJumpStartMs(
+                        timestampMs = timestampMs,
+                        threshold = thresholds.rising,
+                        currentLift = triggerLift,
+                    )
+                    jumpMaxLift = rawLift
+                    diagnosticPeakLift = jumpMaxLift
                     jumpSampleCount = 1
                     jumpHasPairedEvidence = pairedEvidence
-                    log("起跳: lift=${triggerLift.fmt} velocity=${velocity.fmt}")
+                    log(
+                        "起跳: lift=${triggerLift.fmt} raw=${rawLift.fmt} " +
+                            "start=${jumpStartMs} velocity=${velocity.fmt}",
+                    )
                     JumpPhase.Rising
                 } else {
+                    // Only a grounded sample may move the standing reference.
+                    // Once the threshold is crossed, the reference is frozen
+                    // until landing is resolved.
+                    updateGroundBaseline(sample, lift, allowFastUpdate = false)
                     JumpPhase.Grounded
                 }
             }
-            JumpPhase.Rising -> when {
-                landingLift <= thresholds.ground -> {
-                    onCount("低帧率回落")
-                    JumpPhase.Grounded
-                }
-                lift >= thresholds.airborne -> {
-                    recordJumpSample(lift, pairedEvidence)
-                    log("进入空中: lift=${lift.fmt} velocity=${velocity.fmt}")
-                    JumpPhase.Airborne
-                }
-                timestampMs - phaseStartMs > MaxRisingMs -> {
-                    log("Rising 超时(${timestampMs - phaseStartMs}ms)，重置到 Grounded")
-                    resetJumpTracking()
-                    updateGroundBaseline(sample, lift, allowFastUpdate = true)
-                    JumpPhase.Grounded
-                }
-                else -> {
-                    recordJumpSample(lift, pairedEvidence)
-                    JumpPhase.Rising
+            JumpPhase.Rising -> {
+                // Capture the sample before checking for an immediate landing;
+                // a sparse stream can put the only visible peak on the frame
+                // that already falls below the ground threshold after filtering.
+                updateJumpPeak(rawLift)
+                when {
+                    landingLift <= thresholds.ground -> {
+                        onCount("低帧率回落")
+                        JumpPhase.Grounded
+                    }
+                    lift >= thresholds.airborne -> {
+                        jumpSampleCount += 1
+                        jumpHasPairedEvidence = jumpHasPairedEvidence || pairedEvidence
+                        log("进入空中: lift=${lift.fmt} velocity=${velocity.fmt}")
+                        JumpPhase.Airborne
+                    }
+                    timestampMs - phaseStartMs > MaxRisingMs -> {
+                        log("Rising 超时(${timestampMs - phaseStartMs}ms)，重置到 Grounded")
+                        resetJumpTracking()
+                        updateGroundBaseline(sample, lift, allowFastUpdate = true)
+                        JumpPhase.Grounded
+                    }
+                    else -> {
+                        jumpSampleCount += 1
+                        jumpHasPairedEvidence = jumpHasPairedEvidence || pairedEvidence
+                        JumpPhase.Rising
+                    }
                 }
             }
             JumpPhase.Airborne -> {
-                recordJumpSample(lift, pairedEvidence)
+                recordJumpSample(rawLift, pairedEvidence)
                 when {
                     landingLift <= thresholds.ground -> {
                         onCount("空中直接落地")
@@ -405,7 +463,7 @@ class JumpCounter(
                 }
             }
             JumpPhase.Landing -> {
-                recordJumpSample(lift, pairedEvidence)
+                recordJumpSample(rawLift, pairedEvidence)
                 if (landingLift <= thresholds.ground) {
                     onCount("落地")
                     JumpPhase.Grounded
@@ -430,6 +488,7 @@ class JumpCounter(
             smoothedLift = null
             previousLift = null
             previousSampleMs = null
+            previousRawLift = null
             lastFilterMs = null
             log("姿态丢失过长(${lostMs}ms)，重置状态")
             baselineBodyY = null
@@ -450,6 +509,7 @@ class JumpCounter(
             smoothedLift = null
             previousLift = null
             previousSampleMs = null
+            previousRawLift = null
             lastFilterMs = null
             phase = if (baselineBodyY != null || baselineFootY != null) {
                 JumpPhase.Grounded
@@ -501,6 +561,12 @@ class JumpCounter(
                     countedThisFrame -> "counted"
                     else -> "sample"
                 },
+                sampleIntervalMs = diagnosticSampleIntervalMs,
+                rawLift = diagnosticRawLift,
+                smoothedLift = diagnosticSmoothedLift,
+                peakLift = diagnosticPeakLift,
+                jumpDurationMs = diagnosticJumpDurationMs,
+                rejectionReason = diagnosticRejectionReason,
             ),
         )
         return result
@@ -532,6 +598,8 @@ class JumpCounter(
         reason: String,
     ): Boolean {
         val airTimeMs = timestampMs - jumpStartMs
+        diagnosticJumpDurationMs = airTimeMs
+        diagnosticPeakLift = jumpMaxLift
         val reconciledEstimate = findReconciliableEstimate(timestampMs)
         val timeSinceLastCount = lastEventMs?.let { timestampMs - it } ?: Long.MAX_VALUE
         val canCountAgain = reconciledEstimate != null || timeSinceLastCount >= minRefractoryMs()
@@ -562,19 +630,26 @@ class JumpCounter(
                     "maxLift=${jumpMaxLift.fmt}, samples=$jumpSampleCount, sinceLast=${timeSinceLastCount}ms",
             )
         } else {
-            when {
-                !enoughLift ->
+            diagnosticRejectionReason = when {
+                !enoughLift -> {
                     log(
                         "拒绝计数($reason): 跳跃幅度不足(maxLift=${jumpMaxLift.fmt} < " +
                             "${thresholds.weakPeak.fmt}), samples=$jumpSampleCount, lift=${lift.fmt}",
                     )
-                !reasonableAirTime ->
+                    "insufficient_lift"
+                }
+                !reasonableAirTime -> {
                     log(
                         "拒绝计数($reason): 持续时间不合理(${airTimeMs}ms, " +
                             "range=${minAirTime}..${MaxJumpDurationMs}ms), lift=${lift.fmt}",
                     )
-                !canCountAgain ->
+                    "air_time"
+                }
+                !canCountAgain -> {
                     log("拒绝计数($reason): 自适应不应期内(${timeSinceLastCount}ms)")
+                    "refractory"
+                }
+                else -> "unknown"
             }
         }
 
@@ -583,14 +658,40 @@ class JumpCounter(
         return counted
     }
 
-    private fun recordJumpSample(lift: Float) {
-        jumpMaxLift = maxOf(jumpMaxLift, lift)
+    private fun recordJumpSample(rawLift: Float) {
+        // Use the filtered value for phase transitions, but retain the raw
+        // displacement peak for the final evidence check. A real peak can be
+        // attenuated by the low-pass filter when the camera samples it once.
+        updateJumpPeak(rawLift)
         jumpSampleCount += 1
     }
 
-    private fun recordJumpSample(lift: Float, pairedEvidence: Boolean) {
-        recordJumpSample(lift)
+    private fun updateJumpPeak(rawLift: Float) {
+        jumpMaxLift = maxOf(jumpMaxLift, rawLift)
+        diagnosticPeakLift = jumpMaxLift
+    }
+
+    private fun recordJumpSample(rawLift: Float, pairedEvidence: Boolean) {
+        recordJumpSample(rawLift)
         jumpHasPairedEvidence = jumpHasPairedEvidence || pairedEvidence
+    }
+
+    private fun estimateJumpStartMs(
+        timestampMs: Long,
+        threshold: Float,
+        currentLift: Float,
+    ): Long {
+        val previousMs = previousSampleMs
+        val previousEffectiveLift = maxOf(previousLift ?: 0f, previousRawLift ?: 0f)
+        if (previousMs == null || previousMs >= timestampMs || suspendedAfterLoss) return timestampMs
+        val intervalMs = timestampMs - previousMs
+        if (intervalMs > MaxInterpolationGapMs || previousEffectiveLift >= threshold || currentLift <= threshold) {
+            return timestampMs
+        }
+        val denominator = currentLift - previousEffectiveLift
+        if (denominator <= 0f) return timestampMs
+        val ratio = ((threshold - previousEffectiveLift) / denominator).coerceIn(0f, 1f)
+        return previousMs + (intervalMs * ratio).toLong()
     }
 
     private fun resetJumpTracking() {
@@ -598,6 +699,7 @@ class JumpCounter(
         jumpSampleCount = 0
         smoothedLift = null
         previousLift = null
+        previousRawLift = null
         lastFilterMs = null
         jumpHasPairedEvidence = false
     }
@@ -814,6 +916,15 @@ class JumpCounter(
         )
     }
 
+    private fun hasPairedLiftEvidence(features: JumpFeatures): Boolean {
+        val bodyLift = features.bodyLift ?: return false
+        val footLift = features.footLift ?: return false
+        // Both signals must show a meaningful upward displacement. Because
+        // individual lifts are clipped at zero, checking positivity alone
+        // would let a stationary body paired with a noisy foot qualify.
+        return bodyLift >= MinPairedEvidenceLift && footLift >= MinPairedEvidenceLift
+    }
+
     private fun estimateScale(
         shoulderMid: PosePoint?,
         hipMid: PosePoint?,
@@ -1007,6 +1118,7 @@ class JumpCounter(
         const val MinAdaptiveRefractoryMs = 120L
         const val MaxLostPoseMs = 1500L
         const val MaxTransientLostMs = 150L
+        const val MaxInterpolationGapMs = MaxTransientLostMs
         const val MaxRisingMs = 300L
         const val MaxAirborneMs = 800L
         const val MaxLandingMs = 300L
@@ -1064,6 +1176,7 @@ class JumpCounter(
         const val RefractoryCadenceRatio = 0.55f
         const val MinWeakPeak = 0.022f
         const val MinValidPeak = 0.036f
+        const val MinPairedEvidenceLift = 0.004f
 
         private val Float.fmt: String
             get() = String.format("%.3f", this)

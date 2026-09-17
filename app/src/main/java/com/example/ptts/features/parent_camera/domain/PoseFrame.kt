@@ -67,4 +67,10 @@ data class JumpDiagnostic(
     val estimatedCount: Int,
     val recovering: Boolean,
     val event: String,
+    val sampleIntervalMs: Long? = null,
+    val rawLift: Float? = null,
+    val smoothedLift: Float? = null,
+    val peakLift: Float? = null,
+    val jumpDurationMs: Long? = null,
+    val rejectionReason: String? = null,
 )

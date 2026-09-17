@@ -47,7 +47,7 @@ class PoseFrameAnalyzer(
 
         detector.process(inputImage)
             .addOnSuccessListener { pose ->
-                val inferenceMs = System.currentTimeMillis() - startedAt
+                val inferenceMs = SystemClock.elapsedRealtime() - startedAt
                 val landmarkCount = pose.allPoseLandmarks.size
                 Log.i(TAG, "analyze: ML Kit success, landmarks=$landmarkCount inferenceMs=$inferenceMs")
                 onResult(

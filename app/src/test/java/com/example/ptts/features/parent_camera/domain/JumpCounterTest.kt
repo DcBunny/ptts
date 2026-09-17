@@ -117,6 +117,92 @@ class JumpCounterTest {
     }
 
     @Test
+    fun rawPeakAfterTakeoff_isRetainedWhenSmoothingAttenuatesIt() {
+        val diagnostics = mutableListOf<JumpDiagnostic>()
+        val counter = JumpCounter(onDiagnostic = diagnostics::add)
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+
+        // The first frame only crosses the rising threshold. The real peak is
+        // on the following sample, so the final evidence must retain the
+        // larger raw displacement instead of only the filtered value.
+        result = counter.accept(frame(timestampMs = 80L, footY = GroundFootY - 0.012f))
+        result = counter.accept(frame(timestampMs = 130L, footY = GroundFootY - 0.020f))
+        result = counter.accept(frame(timestampMs = 205L, footY = GroundFootY))
+
+        assertEquals(1, result.count)
+        assertTrue(result.countedThisFrame)
+        val counted = diagnostics.last { it.event == "counted" }
+        assertTrue((counted.peakLift ?: 0f) > (counted.smoothedLift ?: 0f))
+    }
+
+    @Test
+    fun thresholdCrossingIsInterpolatedForShortVisibleJump() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+
+        // The first sample is below the rising threshold and the next sample
+        // is the first visible peak. Without interpolation, the apparent air
+        // time is only 60 ms and the jump is rejected as too short.
+        result = counter.accept(frame(timestampMs = 80L, footY = GroundFootY - 0.011f))
+        result = counter.accept(frame(timestampMs = 160L, footY = GroundFootY - 0.040f))
+        result = counter.accept(frame(timestampMs = 220L, footY = GroundFootY))
+
+        assertEquals(1, result.count)
+        assertTrue(result.countedThisFrame)
+    }
+
+    @Test
+    fun singleFrameFootPeak_withoutBodyLiftDoesNotUseWideLowFramePath() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+
+        result = counter.accept(frame(timestampMs = 80L, footY = GroundFootY - 0.020f))
+        result = counter.accept(frame(timestampMs = 160L, footY = GroundFootY))
+
+        assertEquals(0, result.count)
+        assertFalse(result.countedThisFrame)
+    }
+
+    @Test
+    fun diagnosticsExposeSamplingAndDecisionEvidence() {
+        val diagnostics = mutableListOf<JumpDiagnostic>()
+        val counter = JumpCounter(onDiagnostic = diagnostics::add)
+
+        counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+        counter.accept(frame(timestampMs = 80L, footY = GroundFootY - 0.055f))
+        counter.accept(frame(timestampMs = 150L, footY = GroundFootY - 0.070f))
+        val result = counter.accept(frame(timestampMs = 240L, footY = GroundFootY))
+
+        assertTrue(result.countedThisFrame)
+        val counted = diagnostics.last { it.event == "counted" }
+        assertEquals(90L, counted.sampleIntervalMs)
+        assertTrue((counted.rawLift ?: 0f) >= 0f)
+        assertTrue((counted.smoothedLift ?: 0f) >= 0f)
+        assertTrue((counted.peakLift ?: 0f) > 0f)
+        assertTrue((counted.jumpDurationMs ?: 0L) >= 95L)
+        assertEquals(null, counted.rejectionReason)
+    }
+
+    @Test
+    fun normalJumpsAtCommonSamplingIntervals_countWithoutPeakFrameAlignment() {
+        for (intervalMs in listOf(33L, 50L, 67L)) {
+            val counter = JumpCounter()
+            var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+            var timestampMs = 47L
+
+            repeat(12) {
+                result = counter.accept(frame(timestampMs = timestampMs, footY = GroundFootY - 0.020f))
+                result = counter.accept(frame(timestampMs = timestampMs + intervalMs, footY = GroundFootY - 0.060f))
+                result = counter.accept(frame(timestampMs = timestampMs + intervalMs * 2, footY = GroundFootY - 0.018f))
+                result = counter.accept(frame(timestampMs = timestampMs + intervalMs * 3, footY = GroundFootY))
+                timestampMs += 300L
+            }
+
+            assertEquals("interval=${intervalMs}ms", 12, result.count)
+        }
+    }
+
+    @Test
     fun toeBounceStyleJumps_countWithLowAmplitudeWhenMotionPersists() {
         val counter = JumpCounter()
         var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
