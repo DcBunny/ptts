@@ -73,4 +73,17 @@ data class JumpDiagnostic(
     val peakLift: Float? = null,
     val jumpDurationMs: Long? = null,
     val rejectionReason: String? = null,
+    val recoveryStage: String? = null,
+    val recoveryBaselineBodyY: Float? = null,
+    val recoveryBaselineFootY: Float? = null,
+    val recoveryScale: Float? = null,
+    val recoveryCycleMs: Long? = null,
+    val recoveryValidPeakThreshold: Float? = null,
+    val recoveryMatchedEstimate: Boolean = false,
+    /** Median observed pose-frame interval, the basis for every adaptive phase window. */
+    val medianFrameIntervalMs: Long? = null,
+    /** 90th percentile interval: what the counter treats as a normal worst-case gap. */
+    val typicalWorstFrameIntervalMs: Long? = null,
+    /** Learned typical jump amplitude; null until real jumps have been observed. */
+    val adaptivePeakLift: Float? = null,
 )

@@ -30,6 +30,8 @@ data class ParentCameraUiState(
     val analysisFps: Float = 0f,
     val inferenceMs: Long = 0L,
     val poseOverlay: PoseOverlay = PoseOverlay(),
+    /** Aspect ratio of the analysis image the overlay landmarks live in. */
+    val analysisAspectRatio: Float = AnalysisAspectRatioDefault,
     val errorState: ParentCameraError? = null,
     val cameraPermissionGranted: Boolean = false,
     val isCameraReady: Boolean = false,
@@ -69,3 +71,6 @@ data class PoseOverlayPoint(
     val x: Float,
     val y: Float,
 )
+
+/** 4:3 upright analysis frames are the previous default and a safe fallback. */
+const val AnalysisAspectRatioDefault = 4f / 3f

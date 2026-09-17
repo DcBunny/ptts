@@ -17,6 +17,7 @@ class JumpCounter(
     private var jumpStartMs = 0L
     private var lastValidMs: Long? = null
     private var lastInputMs: Long? = null
+    private var lastFrameSeenMs: Long? = null
     private var phaseStartMs = 0L
     private var jumpMaxLift = 0f
     private var jumpSampleCount = 0
@@ -39,7 +40,34 @@ class JumpCounter(
     private var suspendedAfterLoss = false
     private var cameraRecoveryPending = false
     private var cameraStableSinceMs: Long? = null
+    private var recoveryWindowDurationMs = DefaultRecoveryCycleMs
+    private var recoveryMaxBodyY: Float? = null
+    private var recoveryMaxFootY: Float? = null
+    private var recoveryMinBodyY: Float? = null
+    private var recoveryMinFootY: Float? = null
+    private var recoveryStableSampleCount = 0
+    private val recoveryScales = mutableListOf<Float>()
+    private var recoveryEstimateEnabled = false
+    private var poseLossStartedInJump = false
+    private var suppressNextCadenceSample = false
     private var jumpHasPairedEvidence = false
+    private var recoveryWindowStartedMs = 0L
+    private var hasObservedPeakLift = false
+    private var lastObservedPeakLift = 0f
+
+    // Observed sampling cadence. Every phase timeout used to be a fixed millisecond
+    // constant, which silently turned into a detection gate on slow devices: at 8 fps a
+    // single dropped frame looked like a lost pose and the whole jump candidate was
+    // discarded. These fields let the counter scale its windows to the actual stream.
+    private val frameIntervals = ArrayDeque<Long>()
+    private var medianFrameMs: Long? = null
+    private var intervalSinceMedianRefresh = 0
+    private var typicalWorstFrameMs: Long? = null
+
+    // Calibration must observe a still person. A child that is already jumping during the
+    // countdown used to be averaged into the standing baseline, which biases every later
+    // measurement.
+    private val calibrationSamples = ArrayDeque<CalibrationSample>()
 
     // Per-frame values retained for the bounded diagnostic stream. These are
     // deliberately reset at the beginning of each accepted frame so a lost
@@ -50,6 +78,8 @@ class JumpCounter(
     private var diagnosticPeakLift: Float? = null
     private var diagnosticJumpDurationMs: Long? = null
     private var diagnosticRejectionReason: String? = null
+    private var diagnosticRecoveryStage: String? = null
+    private var diagnosticRecoveryMatchedEstimate = false
 
     private var calibrationBodyY: Float? = null
     private var calibrationFootY: Float? = null
@@ -72,23 +102,73 @@ class JumpCounter(
             calibrationLastMs = null
             calibrationSampleCount = 0
             calibrationReady = false
+            calibrationSamples.clear()
+            lastFrameSeenMs = null
+            frameIntervals.clear()
+            medianFrameMs = null
+            typicalWorstFrameMs = null
+            intervalSinceMedianRefresh = 0
         }
         log("计数器已重置")
     }
 
     /** Collects stable standing samples while the camera is in framing/countdown. */
     fun calibrate(frame: PoseFrame) {
-        if (lastInputMs != null && frame.timestampMs <= lastInputMs!!) return
+        val seenAt = lastFrameSeenMs
+        if (seenAt != null && frame.timestampMs <= seenAt) return
         val sample = frame.toSample() ?: return
         if (sample.quality == SampleQuality.Unusable) return
+        recordFrameInterval(frame.timestampMs)
+        lastFrameSeenMs = frame.timestampMs
         if (calibrationStartedMs == null) calibrationStartedMs = frame.timestampMs
         calibrationLastMs = frame.timestampMs
+
+        // The reference is only meaningful if the person actually stood still while it was
+        // collected. Without this guard a child who starts jumping during the countdown
+        // poisons the standing baseline and every later lift is measured against noise.
+        val windowStart = frame.timestampMs - MaxCalibrationDriftWindowMs
+        while (calibrationSamples.isNotEmpty() &&
+            calibrationSamples.first().timestampMs < windowStart
+        ) {
+            calibrationSamples.removeFirst()
+        }
+        if (!calibrationIsStationary()) {
+            calibrationSamples.clear()
+            calibrationStartedMs = frame.timestampMs
+            calibrationSampleCount = 0
+            calibrationReady = false
+            log("校准期间检测到移动，重新开始站立采样")
+            return
+        }
+
+        calibrationSamples += CalibrationSample(
+            timestampMs = frame.timestampMs,
+            bodyY = sample.bodyY,
+            footY = sample.footY,
+        )
         calibrationSampleCount += 1
         sample.bodyY?.let { calibrationBodyY = smooth(calibrationBodyY ?: it, it, CalibrationSmoothing) }
         sample.footY?.let { calibrationFootY = smooth(calibrationFootY ?: it, it, CalibrationSmoothing) }
         calibrationScale = smooth(calibrationScale ?: sample.scale, sample.scale, CalibrationSmoothing)
-        calibrationReady = calibrationSampleCount >= MinCalibrationSamples &&
-            frame.timestampMs - (calibrationStartedMs ?: frame.timestampMs) >= CalibrationWindowMs
+        // Readiness requires a window that actually spans the calibration duration. Marking it
+        // ready after a handful of frames let a burst of jump frames count as a valid standing
+        // reference before the drift guard had anything to compare against.
+        val newest = calibrationSamples.last().timestampMs
+        val oldest = calibrationSamples.first().timestampMs
+        val coveredMs = newest - oldest
+        calibrationReady = calibrationSamples.size >= MinCalibrationSamples &&
+            coveredMs >= CalibrationWindowMs
+    }
+
+    private fun calibrationIsStationary(): Boolean {
+        if (calibrationSamples.size < MinCalibrationStationarySamples) return true
+        val scale = calibrationScale ?: FallbackBodyScale
+        val bodyYs = calibrationSamples.mapNotNull { it.bodyY }
+        val footYs = calibrationSamples.mapNotNull { it.footY }
+        val bodyRange = if (bodyYs.isEmpty()) 0f else bodyYs.max() - bodyYs.min()
+        val footRange = if (footYs.isEmpty()) 0f else footYs.max() - footYs.min()
+        val allowedRange = (scale * MaxCalibrationDriftRatio).coerceAtLeast(MinCalibrationDriftRange)
+        return maxOf(bodyRange, footRange) <= allowedRange
     }
 
     /** Starts a recording session, preserving the standing calibration collected before recording. */
@@ -136,13 +216,28 @@ class JumpCounter(
         suspendedAfterLoss = false
         cameraRecoveryPending = false
         cameraStableSinceMs = null
+        recoveryWindowDurationMs = DefaultRecoveryCycleMs
+        recoveryMaxBodyY = null
+        recoveryMaxFootY = null
+        recoveryMinBodyY = null
+        recoveryMinFootY = null
+        recoveryStableSampleCount = 0
+        recoveryScales.clear()
+        recoveryEstimateEnabled = false
+        poseLossStartedInJump = false
+        suppressNextCadenceSample = false
         jumpHasPairedEvidence = false
+        recoveryWindowStartedMs = 0L
+        hasObservedPeakLift = false
+        lastObservedPeakLift = 0f
         diagnosticSampleIntervalMs = null
         diagnosticRawLift = null
         diagnosticSmoothedLift = null
         diagnosticPeakLift = null
         diagnosticJumpDurationMs = null
         diagnosticRejectionReason = null
+        diagnosticRecoveryStage = null
+        diagnosticRecoveryMatchedEstimate = false
     }
 
     fun accept(frame: PoseFrame): JumpCounterResult {
@@ -155,45 +250,61 @@ class JumpCounter(
             diagnosticPeakLift = null
             diagnosticJumpDurationMs = null
             diagnosticRejectionReason = null
-            return result(TrackingQuality.PartialBody, countedThisFrame = false)
+            return result(emptyPoseTrackingQuality(frame), countedThisFrame = false)
         }
+        recordFrameInterval(frame.timestampMs)
+        lastFrameSeenMs = frame.timestampMs
         diagnosticSampleIntervalMs = lastInputMs?.let { frame.timestampMs - it }
         diagnosticRawLift = null
         diagnosticSmoothedLift = null
         diagnosticPeakLift = null
         diagnosticJumpDurationMs = null
         diagnosticRejectionReason = null
+        diagnosticRecoveryStage = null
+        diagnosticRecoveryMatchedEstimate = false
         lastInputMs = frame.timestampMs
         val cameraUnstable = frame.cameraMotion.available && !frame.cameraMotion.reliable &&
             frame.cameraMotion.magnitude >= CameraMotionRecoveryThreshold
         if (cameraUnstable) {
-            cameraRecoveryPending = true
-            cameraStableSinceMs = null
-            resetJumpTracking()
-            phase = JumpPhase.Grounded
-            recoveringSinceMs = frame.timestampMs
+            beginRecovery(frame.timestampMs, "camera_motion")
         }
         val sample = frame.toSample()
         if (sample == null || sample.quality == SampleQuality.Unusable) {
-            cameraStableSinceMs = null
+            if (cameraRecoveryPending) {
+                val lostMs = lastValidMs?.let { frame.timestampMs - it } ?: Long.MAX_VALUE
+                val maxLostMs = computeMaxLostPoseMs()
+                if (lostMs > maxLostMs) {
+                    expireRecovery(frame.timestampMs)
+                    return result(
+                        emptyPoseTrackingQuality(frame),
+                        countedThisFrame = false,
+                        recovering = false,
+                    )
+                }
+                noteRecoveryLoss(frame.timestampMs)
+                estimateDuringLoss(frame.timestampMs)
+                return result(
+                    emptyPoseTrackingQuality(frame),
+                    countedThisFrame = false,
+                    estimatedThisFrame = false,
+                    recovering = true,
+                )
+            }
             val estimated = handleLostFrame(frame.timestampMs)
             return result(
-                TrackingQuality.PartialBody,
+                emptyPoseTrackingQuality(frame),
                 countedThisFrame = false,
                 estimatedThisFrame = estimated,
             )
         }
 
         if (cameraRecoveryPending) {
-            if (lastValidMs?.let { frame.timestampMs - it > MaxTransientLostMs } == true) {
-                cameraStableSinceMs = null
-            }
             lastValidMs = frame.timestampMs
-            return recoverAfterCameraMotion(frame.timestampMs, sample, cameraUnstable)
+            return processRecoverySample(frame.timestampMs, sample, cameraUnstable)
         }
 
         val gapSinceValid = lastValidMs?.let { frame.timestampMs - it } ?: 0L
-        if (gapSinceValid > MaxTransientLostMs && recoveringSinceMs == null &&
+        if (gapSinceValid > computeTransientLostMs() && recoveringSinceMs == null &&
             phase != JumpPhase.Grounded && phase != JumpPhase.Searching
         ) {
             handleLostFrame(frame.timestampMs)
@@ -230,15 +341,37 @@ class JumpCounter(
         // A grounded person can legitimately reappear at a new image position
         // after a short occlusion or camera reposition. Re-anchor before using
         // the displacement as jump evidence.
-        if (wasRecovering && phase == JumpPhase.Grounded) {
-            val reconciledEstimate = findReconciliableEstimate(frame.timestampMs)
-            if (reconciledEstimate != null) {
-                estimatedEventTimes.remove(reconciledEstimate)
-                estimatedCount = (estimatedCount - 1).coerceAtLeast(0)
-                confirmedCount += 1
-                lastConfirmedMs = frame.timestampMs
-                lastEventMs = frame.timestampMs
-                log("恢复帧匹配节奏估算: timestamp=${frame.timestampMs}")
+        val featuresAtRecoveryForMerge = sample.toFeatures(baselineBodyY, baselineFootY)
+        val recoveredOnGround = phase == JumpPhase.Grounded ||
+            featuresAtRecoveryForMerge.combinedLift <= GroundThreshold
+        if (!cameraRecoveryPending && wasRecovering && recoveredOnGround) {
+            val featuresAtRecovery = featuresAtRecoveryForMerge
+            val hasLandingEvidence = poseLossStartedInJump &&
+                featuresAtRecovery.combinedLift <= GroundThreshold
+            // A short dropout can swallow the landing frame itself. The candidate jump is
+            // resolved here instead of being thrown away, so a jump the child demonstrably
+            // completed is still counted.
+            var countedLanding = false
+            if (hasLandingEvidence) {
+                countedLanding = maybeCountLanding(
+                    timestampMs = frame.timestampMs,
+                    sample = sample,
+                    lift = featuresAtRecovery.combinedLift.coerceAtMost(GroundThreshold),
+                    thresholds = thresholds(),
+                    reason = "姿态恢复落地",
+                )
+            }
+            if (hasLandingEvidence && !countedLanding) {
+                val reconciledEstimate = findReconciliableEstimate(frame.timestampMs)
+                diagnosticRecoveryMatchedEstimate = reconciledEstimate != null
+                if (reconciledEstimate != null) {
+                    estimatedEventTimes.remove(reconciledEstimate)
+                    estimatedCount = (estimatedCount - 1).coerceAtLeast(0)
+                    confirmedCount += 1
+                    lastConfirmedMs = frame.timestampMs
+                    lastEventMs = frame.timestampMs
+                    log("恢复帧匹配节奏估算: timestamp=${frame.timestampMs}")
+                }
             }
             baselineBodyY = sample.bodyY ?: baselineBodyY
             baselineFootY = sample.footY ?: baselineFootY
@@ -252,10 +385,13 @@ class JumpCounter(
             recoveringSinceMs = null
             estimateWindowStartMs = null
             estimatedInCurrentGap = 0
+            recoveryEstimateEnabled = false
+            poseLossStartedInJump = false
+            resetJumpTracking()
             log("姿态恢复后重新建立站立基线")
             return result(
                 sample.trackingQuality,
-                countedThisFrame = reconciledEstimate != null,
+                countedThisFrame = countedLanding || diagnosticRecoveryMatchedEstimate,
                 recovering = false,
             )
         }
@@ -286,6 +422,8 @@ class JumpCounter(
         } else {
             if (recovering) {
                 recoveringSinceMs = null
+                recoveryEstimateEnabled = false
+                poseLossStartedInJump = false
                 log("姿态恢复稳定: stableFor=${stableForMs}ms")
             }
             nextPhase(
@@ -335,44 +473,160 @@ class JumpCounter(
         return result(sample.trackingQuality, counted, recovering = recoveringSinceMs != null)
     }
 
-    private fun recoverAfterCameraMotion(
+    private fun beginRecovery(timestampMs: Long, reason: String) {
+        if (!cameraRecoveryPending) {
+            cameraRecoveryPending = true
+            recoveryEstimateEnabled = true
+            recoveryWindowDurationMs = (averageCycleMs ?: DefaultRecoveryCycleMs)
+                .toLong()
+                .coerceIn(MinRecoveryCycleMs, MaxRecoveryCycleMs)
+            if (estimateWindowStartMs == null) estimateWindowStartMs = timestampMs
+            recoveryWindowStartedMs = timestampMs
+            // Only the recovery window is reset here. Cadence, learned peak,
+            // and already estimated events must survive repeated movement.
+            resetRecoverySampling()
+        } else {
+            // A second movement belongs to the same interruption. Restart the
+            // stable sample window, but keep the estimate quota untouched.
+            resetRecoverySampling()
+        }
+        resetJumpTracking()
+        poseLossStartedInJump = false
+        phase = JumpPhase.Grounded
+        phaseStartMs = timestampMs
+        stableSinceMs = null
+        recoveringSinceMs = timestampMs
+        suspendedAfterLoss = true
+        diagnosticRecoveryStage = reason
+        log("进入恢复窗口: reason=$reason cycle=${recoveryWindowDurationMs}ms")
+    }
+
+    private fun resetRecoverySampling() {
+        cameraStableSinceMs = null
+        recoveryMaxBodyY = null
+        recoveryMaxFootY = null
+        recoveryMinBodyY = null
+        recoveryMinFootY = null
+        recoveryStableSampleCount = 0
+        recoveryScales.clear()
+    }
+
+    private fun noteRecoveryLoss(timestampMs: Long) {
+        resetRecoverySampling()
+        diagnosticRecoveryStage = "lost"
+        log("恢复窗口丢失姿态: timestamp=$timestampMs")
+    }
+
+    private fun expireRecovery(timestampMs: Long) {
+        cameraRecoveryPending = false
+        recoveringSinceMs = null
+        recoveryEstimateEnabled = false
+        poseLossStartedInJump = false
+        resetRecoverySampling()
+        resetJumpTracking()
+        baselineBodyY = null
+        baselineFootY = null
+        phase = JumpPhase.Searching
+        stableSinceMs = null
+        estimateWindowStartMs = null
+        estimatedInCurrentGap = 0
+        // Already estimated events are kept: a score that has been shown to the user must
+        // never shrink because the camera kept moving afterwards.
+        suspendedAfterLoss = false
+        diagnosticRecoveryStage = "expired"
+        log("恢复窗口超时(${timestampMs}ms)，等待重新建立基线")
+    }
+
+    private fun processRecoverySample(
         timestampMs: Long,
         sample: PoseSample,
         cameraUnstable: Boolean,
     ): JumpCounterResult {
-        // 移动期间丢弃旧跳跃；稳定窗口内取最低站位，避免将腾空位置当作地面。
-        val firstStableSample = cameraStableSinceMs == null
-        baselineBodyY = sample.bodyY?.let {
-            if (cameraUnstable || firstStableSample) it else maxOf(baselineBodyY ?: it, it)
+        if (cameraUnstable && timestampMs - recoveryWindowStartedMs > computeMaxRecoveryMs()) {
+            // Handheld capture can keep the background matcher "unreliable" forever. Without
+            // this escape hatch the counter stops counting permanently after any camera move.
+            log("恢复窗口持续抖动超过上限，按当前姿态重建基线")
+            finalizeRecovery(timestampMs, sample)
+            return result(sample.trackingQuality, countedThisFrame = false, recovering = false)
         }
-        baselineFootY = sample.footY?.let {
-            if (cameraUnstable || firstStableSample) it else maxOf(baselineFootY ?: it, it)
+        if (cameraUnstable) {
+            resetRecoverySampling()
+            diagnosticRecoveryStage = "moving"
+            estimateDuringLoss(timestampMs)
+            return result(sample.trackingQuality, countedThisFrame = false, recovering = true)
         }
-        lastStableScale = sample.scale
-        resetJumpTracking()
-        previousSampleMs = null
-        previousRawLift = null
+
+        val stableStart = cameraStableSinceMs ?: timestampMs.also {
+            cameraStableSinceMs = it
+            diagnosticRecoveryStage = "stabilizing"
+        }
+        recoveryMaxBodyY = maxOfNullable(recoveryMaxBodyY, sample.bodyY)
+        recoveryMaxFootY = maxOfNullable(recoveryMaxFootY, sample.footY)
+        recoveryMinBodyY = minOfNullable(recoveryMinBodyY, sample.bodyY)
+        recoveryMinFootY = minOfNullable(recoveryMinFootY, sample.footY)
+        recoveryStableSampleCount += 1
+        if (sample.measuredScaleReliable) recoveryScales += sample.scale
+        if (recoveryScales.size > MaxRecoveryScaleSamples) recoveryScales.removeAt(0)
+        estimateDuringLoss(timestampMs)
+
+        val stableForMs = timestampMs - stableStart
+        if (stableForMs < RecoveryStableBeforeCountingMs) {
+            diagnosticRecoveryStage = "stabilizing"
+            return result(sample.trackingQuality, countedThisFrame = false, recovering = true)
+        }
+
+        val windowStart = stableStart
+        val windowForMs = timestampMs - windowStart
+        if (stableForMs >= RecoveryStableBeforeCountingMs &&
+            recoveryStableSampleCount >= MinRecoverySamples &&
+            recoveryRangeIsStationary()
+        ) {
+            finalizeRecovery(timestampMs, sample)
+            return result(sample.trackingQuality, countedThisFrame = false, recovering = false)
+        }
+        if (windowForMs < recoveryWindowDurationMs) {
+            diagnosticRecoveryStage = "sampling"
+            return result(sample.trackingQuality, countedThisFrame = false, recovering = true)
+        }
+
+        finalizeRecovery(timestampMs, sample)
+        return result(sample.trackingQuality, countedThisFrame = false, recovering = false)
+    }
+
+    private fun finalizeRecovery(timestampMs: Long, sample: PoseSample) {
+        baselineBodyY = recoveryMaxBodyY ?: sample.bodyY ?: baselineBodyY
+        baselineFootY = recoveryMaxFootY ?: sample.footY ?: baselineFootY
+        medianOrNull(recoveryScales)?.let { lastStableScale = it }
+        if (lastStableScale == null) lastStableScale = sample.scale
+
+        cameraRecoveryPending = false
+        cameraStableSinceMs = null
+        recoveringSinceMs = null
+        recoveryEstimateEnabled = false
+        poseLossStartedInJump = false
+        stableSinceMs = timestampMs - MinStableBeforeCountingMs
         phase = JumpPhase.Grounded
         phaseStartMs = timestampMs
-        estimateWindowStartMs = null
-        estimatedInCurrentGap = 0
+        resetJumpTracking()
+        val initialLift = sample.toFeatures(baselineBodyY, baselineFootY).combinedLift
+        smoothedLift = initialLift.coerceAtMost(GroundThreshold)
+        previousLift = smoothedLift
+        previousRawLift = smoothedLift
+        previousSampleMs = timestampMs
+        lastFilterMs = timestampMs
         suspendedAfterLoss = false
-        if (!cameraUnstable) {
-            val stableStart = cameraStableSinceMs ?: timestampMs.also { cameraStableSinceMs = it }
-            if (timestampMs - stableStart >= RecoveryStableBeforeCountingMs) {
-                cameraRecoveryPending = false
-                cameraStableSinceMs = null
-                recoveringSinceMs = null
-                // 稳定窗口已完成，下一帧直接检测起跳，不再叠加启动等待。
-                stableSinceMs = timestampMs - MinStableBeforeCountingMs
-                smoothedLift = sample.toFeatures(baselineBodyY, baselineFootY).combinedLift
-                previousLift = smoothedLift
-                previousRawLift = smoothedLift
-                previousSampleMs = timestampMs
-                lastFilterMs = timestampMs
-            }
-        }
-        return result(sample.trackingQuality, countedThisFrame = false, recovering = cameraRecoveryPending)
+        suppressNextCadenceSample = true
+        recoveryMaxBodyY = null
+        recoveryMaxFootY = null
+        recoveryMinBodyY = null
+        recoveryMinFootY = null
+        recoveryStableSampleCount = 0
+        recoveryScales.clear()
+        diagnosticRecoveryStage = "ready"
+        log(
+            "恢复基线完成: body=${baselineBodyY?.fmt} foot=${baselineFootY?.fmt} " +
+                "scale=${lastStableScale?.fmt} window=${recoveryWindowDurationMs}ms",
+        )
     }
 
     private fun nextPhase(
@@ -429,7 +683,7 @@ class JumpCounter(
                         log("进入空中: lift=${lift.fmt} velocity=${velocity.fmt}")
                         JumpPhase.Airborne
                     }
-                    timestampMs - phaseStartMs > MaxRisingMs -> {
+                    timestampMs - phaseStartMs > computeMaxRisingMs() -> {
                         log("Rising 超时(${timestampMs - phaseStartMs}ms)，重置到 Grounded")
                         resetJumpTracking()
                         updateGroundBaseline(sample, lift, allowFastUpdate = true)
@@ -453,7 +707,7 @@ class JumpCounter(
                         log("开始落地: lift=${lift.fmt} velocity=${velocity.fmt}")
                         JumpPhase.Landing
                     }
-                    timestampMs - phaseStartMs > MaxAirborneMs -> {
+                    timestampMs - phaseStartMs > computeMaxAirborneMs() -> {
                         log("Airborne 超时(${timestampMs - phaseStartMs}ms)，重置到 Grounded")
                         resetJumpTracking()
                         updateGroundBaseline(sample, lift, allowFastUpdate = true)
@@ -467,7 +721,7 @@ class JumpCounter(
                 if (landingLift <= thresholds.ground) {
                     onCount("落地")
                     JumpPhase.Grounded
-                } else if (timestampMs - phaseStartMs > MaxLandingMs) {
+                } else if (timestampMs - phaseStartMs > computeMaxLandingMs()) {
                     log("Landing 超时(${timestampMs - phaseStartMs}ms)，重置到 Grounded")
                     resetJumpTracking()
                     updateGroundBaseline(sample, lift, allowFastUpdate = true)
@@ -482,7 +736,7 @@ class JumpCounter(
     private fun handleLostFrame(timestampMs: Long): Boolean {
         val lastValid = lastValidMs
         val lostMs = if (lastValid == null) 0L else (timestampMs - lastValid).coerceAtLeast(0L)
-        if (lastValid == null || lostMs > MaxLostPoseMs) {
+        if (lastValid == null || lostMs > computeMaxLostPoseMs()) {
             resetJumpTracking()
             stableSinceMs = null
             smoothedLift = null
@@ -495,13 +749,24 @@ class JumpCounter(
             baselineFootY = null
             phase = JumpPhase.Searching
             recoveringSinceMs = null
+            cameraRecoveryPending = false
+            resetRecoverySampling()
+            recoveryEstimateEnabled = false
+            poseLossStartedInJump = false
             estimateWindowStartMs = null
             estimatedInCurrentGap = 0
-            estimatedEventTimes.clear()
+            // Estimated events are intentionally preserved so the displayed score never
+            // decreases after the fact.
             return false
-        } else if (lostMs > MaxTransientLostMs) {
+        } else if (lostMs > computeTransientLostMs()) {
             // A longer gap may still produce bounded cadence estimates, but
-            // the old rising/airborne candidate is no longer trusted.
+            // the old rising/airborne candidate is no longer trusted. Pose
+            // loss without camera motion keeps the existing fast re-anchor;
+            // camera motion uses the longer cycle-based recovery window.
+            val wasInJump = poseLossStartedInJump ||
+                (phase != JumpPhase.Grounded && phase != JumpPhase.Searching)
+            recoveryEstimateEnabled = recoveryEstimateEnabled || wasInJump
+            poseLossStartedInJump = poseLossStartedInJump || wasInJump
             if (estimateWindowStartMs == null) estimateWindowStartMs = timestampMs
             val estimateBefore = estimatedCount
             estimateDuringLoss(timestampMs)
@@ -522,6 +787,13 @@ class JumpCounter(
             log("姿态丢失超过短暂容错(${lostMs}ms)，丢弃当前跳跃候选")
             return estimatedCount > estimateBefore
         } else {
+            // A short gap still interrupts an in-flight jump. Previously only the longer-gap
+            // branch armed cadence estimation, so a one-frame drop in the middle of a jump
+            // silently disabled gap filling.
+            val wasInJump = poseLossStartedInJump ||
+                (phase != JumpPhase.Grounded && phase != JumpPhase.Searching)
+            recoveryEstimateEnabled = recoveryEstimateEnabled || wasInJump
+            poseLossStartedInJump = poseLossStartedInJump || wasInJump
             if (estimateWindowStartMs == null) estimateWindowStartMs = timestampMs
             val estimateBefore = estimatedCount
             estimateDuringLoss(timestampMs)
@@ -548,6 +820,8 @@ class JumpCounter(
             estimatedThisFrame = estimatedThisFrame,
             recovering = recovering,
         )
+        // Building the diagnostic snapshot allocates several objects and formats nothing
+        // cheaply; when no sink is attached (release builds) the work is skipped entirely.
         onDiagnostic?.invoke(
             JumpDiagnostic(
                 timestampMs = lastInputMs ?: 0L,
@@ -567,6 +841,20 @@ class JumpCounter(
                 peakLift = diagnosticPeakLift,
                 jumpDurationMs = diagnosticJumpDurationMs,
                 rejectionReason = diagnosticRejectionReason,
+                recoveryStage = diagnosticRecoveryStage,
+                recoveryBaselineBodyY = recoveryMaxBodyY ?: baselineBodyY,
+                recoveryBaselineFootY = recoveryMaxFootY ?: baselineFootY,
+                recoveryScale = medianOrNull(recoveryScales) ?: lastStableScale,
+                recoveryCycleMs = recoveryWindowDurationMs.takeIf {
+                    diagnosticRecoveryStage != null || cameraRecoveryPending
+                },
+                recoveryValidPeakThreshold = thresholds().validPeak.takeIf {
+                    diagnosticRecoveryStage != null || cameraRecoveryPending
+                },
+                recoveryMatchedEstimate = diagnosticRecoveryMatchedEstimate,
+                medianFrameIntervalMs = medianFrameMs,
+                typicalWorstFrameIntervalMs = typicalWorstFrameMs,
+                adaptivePeakLift = adaptivePeakLift,
             ),
         )
         return result
@@ -601,6 +889,7 @@ class JumpCounter(
         diagnosticJumpDurationMs = airTimeMs
         diagnosticPeakLift = jumpMaxLift
         val reconciledEstimate = findReconciliableEstimate(timestampMs)
+        diagnosticRecoveryMatchedEstimate = reconciledEstimate != null
         val timeSinceLastCount = lastEventMs?.let { timestampMs - it } ?: Long.MAX_VALUE
         val canCountAgain = reconciledEstimate != null || timeSinceLastCount >= minRefractoryMs()
         val lowFrameEligible = jumpSampleCount >= 1 && jumpMaxLift >= thresholds.validPeak && jumpHasPairedEvidence
@@ -608,21 +897,36 @@ class JumpCounter(
             (jumpSampleCount >= MinStandardJumpSamples || lowFrameEligible)
         val isWeakJump = jumpMaxLift >= thresholds.weakPeak && jumpSampleCount >= MinWeakJumpSamples
         val enoughLift = isStandardJump || isWeakJump
-        val minAirTime = if (isStandardJump) MinAirTimeMs else MinWeakAirTimeMs
-        val reasonableAirTime = airTimeMs in minAirTime..MaxJumpDurationMs
+        // A jump cannot be shorter than the sampling interval that produced it. On a slow
+        // analysis stream the fixed minimum air time rejects genuine but sparsely sampled
+        // jumps, which is exactly the situation where a child's counter silently under-counts.
+        val samplingFloorMs = frameIntervalBudget()
+        val minAirTime = if (isStandardJump) {
+            MinAirTimeMs.coerceAtLeast(samplingFloorMs)
+        } else {
+            MinWeakAirTimeMs.coerceAtLeast(samplingFloorMs)
+        }
+        val reasonableAirTime = airTimeMs in minAirTime..computeMaxJumpDurationMs()
         val counted = enoughLift && reasonableAirTime && canCountAgain
+        observeJumpPeak(thresholds)
+        val maxAirTime = computeMaxJumpDurationMs()
 
         if (counted) {
             if (reconciledEstimate != null) {
                 estimatedEventTimes.remove(reconciledEstimate)
                 estimatedCount = (estimatedCount - 1).coerceAtLeast(0)
+                confirmedCount += 1
             } else {
                 confirmedCount += 1
             }
-            updateCadence(timestampMs)
-            adaptivePeakLift = adaptivePeakLift
-                ?.let { smooth(it, jumpMaxLift, AdaptivePeakSmoothing) }
-                ?: jumpMaxLift
+            val cadenceEligible = !suppressNextCadenceSample && reconciledEstimate == null
+            if (cadenceEligible) updateCadence(timestampMs)
+            if (suppressNextCadenceSample) {
+                suppressNextCadenceSample = false
+                estimateWindowStartMs = null
+                estimatedInCurrentGap = 0
+            }
+            updateAdaptivePeak()
             lastEventMs = timestampMs
             lastConfirmedMs = timestampMs
             log(
@@ -641,7 +945,7 @@ class JumpCounter(
                 !reasonableAirTime -> {
                     log(
                         "拒绝计数($reason): 持续时间不合理(${airTimeMs}ms, " +
-                            "range=${minAirTime}..${MaxJumpDurationMs}ms), lift=${lift.fmt}",
+                            "range=${minAirTime}..${maxAirTime}ms), lift=${lift.fmt}",
                     )
                     "air_time"
                 }
@@ -674,6 +978,31 @@ class JumpCounter(
     private fun recordJumpSample(rawLift: Float, pairedEvidence: Boolean) {
         recordJumpSample(rawLift)
         jumpHasPairedEvidence = jumpHasPairedEvidence || pairedEvidence
+    }
+
+    /**
+     * Learns the typical jump amplitude from every resolved jump candidate, not only from the
+     * ones that already passed the gate. Learning only from counted jumps is a deadlock: a
+     * child whose jumps are below the bootstrap threshold can never teach the counter to
+     * accept them, so the profile stays conservative forever.
+     */
+    private fun observeJumpPeak(thresholds: JumpThresholds) {
+        if (jumpSampleCount < MinWeakJumpSamples) return
+        val observed = jumpMaxLift
+        if (observed < thresholds.weakPeak) return
+        // Ignore implausible amplitudes: they are almost always a landmark jump caused by a
+        // tracking glitch rather than a jump-rope cycle, and they would distort the profile.
+        if (observed > thresholds.weakPeak * MaxPlausiblePeakRatio) return
+        lastObservedPeakLift = observed
+        hasObservedPeakLift = true
+    }
+
+    private fun updateAdaptivePeak() {
+        if (!hasObservedPeakLift) return
+        val observed = lastObservedPeakLift
+        adaptivePeakLift = adaptivePeakLift
+            ?.let { smooth(it, observed, AdaptivePeakSmoothing) }
+            ?: observed
     }
 
     private fun estimateJumpStartMs(
@@ -735,10 +1064,13 @@ class JumpCounter(
         val learnedValidPeak = learnedPeak?.let { (it * LearnedValidPeakRatio).coerceIn(MinValidPeak, ValidJumpThreshold) }
         val weakPeak = learnedWeakPeak ?: WeakJumpThreshold
         val validPeak = learnedValidPeak ?: ValidJumpThreshold
+        val airborne = minOf(AirborneThreshold, validPeak * AirborneThresholdRatio)
+        val landing = LandingThreshold
+            .coerceIn(GroundThreshold + MinLandingBand, airborne - MinLandingBand)
         return JumpThresholds(
             rising = minOf(RisingThreshold, weakPeak * RisingThresholdRatio),
-            airborne = minOf(AirborneThreshold, validPeak * AirborneThresholdRatio),
-            landing = minOf(LandingThreshold, weakPeak * LandingThresholdRatio),
+            airborne = airborne,
+            landing = landing,
             ground = GroundThreshold,
             weakPeak = weakPeak,
             validPeak = validPeak,
@@ -795,7 +1127,7 @@ class JumpCounter(
     }
 
     private fun estimateDuringLoss(timestampMs: Long) {
-        if (phase == JumpPhase.Grounded || phase == JumpPhase.Searching || !cadenceStable()) return
+        if (!recoveryEstimateEnabled || !cadenceStable()) return
         val cycle = averageCycleMs ?: return
         val windowStart = estimateWindowStartMs ?: timestampMs
         if (timestampMs - windowStart > MaxEstimationWindowMs) return
@@ -820,7 +1152,12 @@ class JumpCounter(
     }
 
     private fun PoseFrame.toSample(): PoseSample? {
-        val points = correctedLandmarks()
+        // The background matcher estimates camera translation only. Applying it to the pose
+        // would move the child's landmarks too, which cancels exactly the body displacement a
+        // jump is made of, and the accumulated offset has no meaningful relationship with the
+        // absolute normalized landmark positions returned by ML Kit. Camera repositioning is
+        // handled by the recovery window instead, so the raw landmarks are used as-is.
+        val points = landmarks
         val leftShoulder = points.required(BodyLandmark.LeftShoulder)
         val rightShoulder = points.required(BodyLandmark.RightShoulder)
         val leftHip = points.required(BodyLandmark.LeftHip)
@@ -870,18 +1207,6 @@ class JumpCounter(
             quality = quality,
             measuredScaleReliable = scaleResult.reliable,
         )
-    }
-
-    private fun PoseFrame.correctedLandmarks(): Map<BodyLandmark, PosePoint> {
-        val motion = cameraMotion
-        // offset 是累计的已确认位移；匹配暂时失败时仍保留，防止坐标系来回切换。
-        if (!motion.available) return landmarks
-        return landmarks.mapValues { (_, point) ->
-            point.copy(
-                x = point.x - motion.offsetX,
-                y = point.y - motion.offsetY,
-            )
-        }
     }
 
     private fun PoseSample.toFeatures(
@@ -1049,6 +1374,113 @@ class JumpCounter(
         factor: Float,
     ): Float = previous * (1f - factor) + current * factor
 
+    private fun maxOfNullable(first: Float?, second: Float?): Float? {
+        return when {
+            first == null -> second
+            second == null -> first
+            else -> maxOf(first, second)
+        }
+    }
+
+    private fun minOfNullable(first: Float?, second: Float?): Float? {
+        return when {
+            first == null -> second
+            second == null -> first
+            else -> minOf(first, second)
+        }
+    }
+
+    private fun recoveryRangeIsStationary(): Boolean {
+        val bodyRange = if (recoveryMaxBodyY != null && recoveryMinBodyY != null) {
+            recoveryMaxBodyY!! - recoveryMinBodyY!!
+        } else {
+            0f
+        }
+        val footRange = if (recoveryMaxFootY != null && recoveryMinFootY != null) {
+            recoveryMaxFootY!! - recoveryMinFootY!!
+        } else {
+            0f
+        }
+        return maxOf(bodyRange, footRange) <= MaxStationaryRecoveryRange
+    }
+
+    private fun medianOrNull(values: List<Float>): Float? {
+        if (values.isEmpty()) return null
+        val sorted = values.sorted()
+        val middle = sorted.size / 2
+        return if (sorted.size % 2 == 1) {
+            sorted[middle]
+        } else {
+            (sorted[middle - 1] + sorted[middle]) / 2f
+        }
+    }
+
+    /**
+     * Tracks the real delivery cadence of pose frames. Pose inference while recording runs
+     * well below 30 fps on most phones, so every millisecond-based window has to follow the
+     * observed stream instead of the nominal frame rate.
+     */
+    private fun recordFrameInterval(timestampMs: Long) {
+        val previous = lastInputMs ?: return
+        val interval = timestampMs - previous
+        if (interval <= 0L || interval > MaxTrackedFrameIntervalMs) return
+        frameIntervals.addLast(interval)
+        if (frameIntervals.size > FrameIntervalWindow) frameIntervals.removeFirst()
+        intervalSinceMedianRefresh += 1
+        if (intervalSinceMedianRefresh >= FrameIntervalRefreshEvery || medianFrameMs == null) {
+            refreshFrameIntervalStats()
+        }
+    }
+
+    private fun refreshFrameIntervalStats() {
+        intervalSinceMedianRefresh = 0
+        if (frameIntervals.isEmpty()) return
+        val sorted = frameIntervals.toList().sorted()
+        medianFrameMs = sorted[sorted.size / 2]
+        val p90Index = ((sorted.size - 1) * 0.9f).toInt().coerceIn(0, sorted.lastIndex)
+        typicalWorstFrameMs = sorted[p90Index]
+    }
+
+    private fun frameIntervalBudget(): Long = medianFrameMs ?: NominalFrameMs
+
+    private fun computeTransientLostMs(): Long {
+        val worst = typicalWorstFrameMs ?: NominalFrameMs
+        return maxOf(MaxTransientLostMs, worst * FrameGapSlackRatio)
+            .coerceAtMost(MaxAdaptiveTransientLostMs)
+    }
+
+    private fun computeMaxLostPoseMs(): Long {
+        val worst = typicalWorstFrameMs ?: NominalFrameMs
+        return maxOf(MaxLostPoseMs, worst * FrameGapSlackRatio * 2L)
+            .coerceAtMost(MaxAdaptiveLostPoseMs)
+    }
+
+    private fun computeMaxRisingMs(): Long {
+        val budget = frameIntervalBudget()
+        return maxOf(MaxRisingMs, PhaseSamples * budget).coerceAtMost(MaxAdaptiveRisingMs)
+    }
+
+    private fun computeMaxAirborneMs(): Long {
+        val budget = frameIntervalBudget()
+        return maxOf(MaxAirborneMs, PhaseSamples * budget * 2L).coerceAtMost(MaxAdaptiveAirborneMs)
+    }
+
+    private fun computeMaxLandingMs(): Long {
+        val budget = frameIntervalBudget()
+        return maxOf(MaxLandingMs, PhaseSamples * budget).coerceAtMost(MaxAdaptiveLandingMs)
+    }
+
+    private fun computeMaxJumpDurationMs(): Long {
+        val budget = frameIntervalBudget()
+        return maxOf(MaxJumpDurationMs, budget * 6L).coerceAtMost(MaxAdaptiveJumpDurationMs)
+    }
+
+    private fun computeMaxRecoveryMs(): Long =
+        maxOf(MaxRecoveryDurationMs, recoveryWindowDurationMs * 2L)
+
+    private fun emptyPoseTrackingQuality(frame: PoseFrame): TrackingQuality =
+        if (frame.landmarks.isEmpty()) TrackingQuality.NoPose else TrackingQuality.PartialBody
+
     private fun log(message: String) {
         onLog?.invoke("[JumpCounter] $message")
     }
@@ -1097,6 +1529,12 @@ class JumpCounter(
         val reliable: Boolean,
     )
 
+    private data class CalibrationSample(
+        val timestampMs: Long,
+        val bodyY: Float?,
+        val footY: Float?,
+    )
+
     private companion object {
         const val MinLandmarkConfidence = 0.40f
         const val MinFootConfidence = 0.25f
@@ -1107,7 +1545,10 @@ class JumpCounter(
         const val RisingThreshold = 0.030f
         const val AirborneThreshold = 0.044f
         const val ValidJumpThreshold = 0.046f
-        const val WeakJumpThreshold = 0.031f
+        // Bootstrap gate for a child whose jumps are small. The adaptive profile raises it as
+        // soon as real amplitudes have been observed, so a permissive start no longer stays
+        // permissive for the whole session.
+        const val WeakJumpThreshold = 0.024f
         const val LandingThreshold = 0.034f
         const val GroundThreshold = 0.018f
         const val GroundedBaselineLift = 0.014f
@@ -1117,22 +1558,48 @@ class JumpCounter(
         const val BaseRefractoryMs = 160L
         const val MinAdaptiveRefractoryMs = 120L
         const val MaxLostPoseMs = 1500L
+        const val MaxAdaptiveLostPoseMs = 2500L
         const val MaxTransientLostMs = 150L
-        const val MaxInterpolationGapMs = MaxTransientLostMs
+        const val MaxAdaptiveTransientLostMs = 450L
+        const val MaxInterpolationGapMs = 150L
         const val MaxRisingMs = 300L
+        const val MaxAdaptiveRisingMs = 700L
         const val MaxAirborneMs = 800L
+        const val MaxAdaptiveAirborneMs = 1500L
         const val MaxLandingMs = 300L
+        const val MaxAdaptiveLandingMs = 700L
         const val MaxJumpDurationMs = 900L
+        const val MaxAdaptiveJumpDurationMs = 1300L
+        const val MaxRecoveryDurationMs = 1200L
+
+        // Sampling-cadence adaptation. NominalFrameMs stays the design frame rate for the
+        // filter; the phase windows follow whatever the analyzer actually delivers.
+        const val FrameIntervalWindow = 16
+        const val FrameIntervalRefreshEvery = 4
+        const val FrameGapSlackRatio = 2L
+        const val PhaseSamples = 2L
+        const val MaxTrackedFrameIntervalMs = 2000L
+
         const val MinStandardJumpSamples = 2
         const val MinWeakJumpSamples = 2
         const val MinStableBeforeCountingMs = 300L
         const val RecoveryStableBeforeCountingMs = 150L
+        const val DefaultRecoveryCycleMs = 450L
+        const val MinRecoveryCycleMs = 180L
+        const val MaxRecoveryCycleMs = 900L
+        const val MinRecoverySamples = 3
+        const val MaxStationaryRecoveryRange = 0.012f
+        const val MaxRecoveryScaleSamples = 30
         const val MinCycleMs = 180L
         const val MaxCycleMs = 900L
         const val NominalFrameMs = 33L
         const val MinCalibrationSamples = 5
         const val CalibrationWindowMs = 450L
         const val CalibrationSmoothing = 0.18f
+        const val MaxCalibrationDriftWindowMs = 1200L
+        const val MaxCalibrationDriftRatio = 0.035f
+        const val MinCalibrationDriftRange = 0.006f
+        const val MinCalibrationStationarySamples = 4
         const val MinConfirmedForEstimation = 5
         const val MinCadenceSamples = 4
         const val MaxCadenceSamples = 8
@@ -1168,15 +1635,17 @@ class JumpCounter(
         const val RecoveryBaselineSmoothing = 0.45f
         const val CadenceSmoothing = 0.24f
         const val AdaptivePeakSmoothing = 0.18f
-        const val LearnedWeakPeakRatio = 0.58f
-        const val LearnedValidPeakRatio = 0.72f
+        const val MaxPlausiblePeakRatio = 4f
+        const val MinLandingBand = 0.004f
+        const val LearnedWeakPeakRatio = 0.45f
+        const val LearnedValidPeakRatio = 0.60f
         const val RisingThresholdRatio = 0.82f
         const val AirborneThresholdRatio = 0.96f
-        const val LandingThresholdRatio = 0.88f
+        const val LandingThresholdRatio = 0.60f
         const val RefractoryCadenceRatio = 0.55f
         const val MinWeakPeak = 0.022f
         const val MinValidPeak = 0.036f
-        const val MinPairedEvidenceLift = 0.004f
+        const val MinPairedEvidenceLift = 0.003f
 
         private val Float.fmt: String
             get() = String.format("%.3f", this)

@@ -63,6 +63,7 @@ import com.example.ptts.features.parent_camera.data.PoseAnalysisResult
 import com.example.ptts.features.parent_camera.data.PoseFrameAnalyzer
 import com.example.ptts.features.parent_camera.domain.BodyLandmark
 import com.example.ptts.features.parent_camera.domain.TrackingQuality
+import com.example.ptts.features.parent_camera.presentation.AnalysisAspectRatioDefault
 import com.example.ptts.features.parent_camera.presentation.CaptureQualityIssue
 import com.example.ptts.features.parent_camera.presentation.ParentCameraError
 import com.example.ptts.features.parent_camera.presentation.ParentCameraStage
@@ -181,7 +182,10 @@ private fun ParentCameraContent(
         )
 
         if (state.stage == ParentCameraStage.Recording) {
-            PoseOverlayCanvas(overlay = state.poseOverlay)
+            PoseOverlayCanvas(
+                overlay = state.poseOverlay,
+                analysisAspectRatio = state.analysisAspectRatio,
+            )
             FocusFrame()
         } else if (state.stage != ParentCameraStage.Summary) {
             FocusFrame()
@@ -630,8 +634,30 @@ private fun InfoBadge(value: String) {
 }
 
 @Composable
-private fun PoseOverlayCanvas(overlay: PoseOverlay) {
+private fun PoseOverlayCanvas(
+    overlay: PoseOverlay,
+    analysisAspectRatio: Float,
+) {
     Canvas(modifier = Modifier.fillMaxSize()) {
+        // The preview fills the view and crops the overflow, so the landmark image does not map
+        // linearly onto the canvas. Matching that transform keeps the skeleton on the child
+        // instead of drifting toward the centre of the screen.
+        val imageAspect = analysisAspectRatio.takeIf { it > 0f } ?: AnalysisAspectRatioDefault
+        val canvasAspect = if (size.height <= 0f) imageAspect else size.width / size.height
+        val scaleX: Float
+        val scaleY: Float
+        if (canvasAspect > imageAspect) {
+            // Canvas is wider than the image: width fits, height is cropped.
+            scaleX = size.width
+            scaleY = size.width / imageAspect
+        } else {
+            scaleX = size.height * imageAspect
+            scaleY = size.height
+        }
+        val offsetX = (size.width - scaleX) / 2f
+        val offsetY = (size.height - scaleY) / 2f
+        fun toCanvas(x: Float, y: Float) = Offset(offsetX + x * scaleX, offsetY + y * scaleY)
+
         val pointsByLandmark = overlay.points.associateBy { it.landmark }
         SkeletonSegments.forEach { (start, end) ->
             val startPoint = pointsByLandmark[start]
@@ -639,8 +665,8 @@ private fun PoseOverlayCanvas(overlay: PoseOverlay) {
             if (startPoint != null && endPoint != null) {
                 drawLine(
                     color = CameraAccent.copy(alpha = 0.88f),
-                    start = Offset(startPoint.x * size.width, startPoint.y * size.height),
-                    end = Offset(endPoint.x * size.width, endPoint.y * size.height),
+                    start = toCanvas(startPoint.x, startPoint.y),
+                    end = toCanvas(endPoint.x, endPoint.y),
                     strokeWidth = 5.dp.toPx(),
                     cap = StrokeCap.Round,
                 )
@@ -650,7 +676,7 @@ private fun PoseOverlayCanvas(overlay: PoseOverlay) {
             drawCircle(
                 color = Color(0xFFE3FFF8),
                 radius = 5.dp.toPx(),
-                center = Offset(point.x * size.width, point.y * size.height),
+                center = toCanvas(point.x, point.y),
             )
         }
     }

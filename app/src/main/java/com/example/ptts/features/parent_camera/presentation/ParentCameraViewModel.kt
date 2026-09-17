@@ -36,8 +36,11 @@ class ParentCameraViewModel(
     durationSeconds: Int,
 ) : AndroidViewModel(application) {
     private val repository = JumpRecordRepository(application)
+    private val diagnosticsEnabled =
+        (application.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
     private val diagnostics = JumpSessionDiagnosticRecorder(
-        enabled = (application.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0,
+        enabled = diagnosticsEnabled,
+        outputDir = File(application.cacheDir, DIAGNOSTICS_DIR),
     )
     private val jumpCounter = JumpCounter(
         onLog = ::logJumpSession,
@@ -221,6 +224,7 @@ class ParentCameraViewModel(
                     ),
                     analysisFps = fps,
                     inferenceMs = result.inferenceMs,
+                    analysisAspectRatio = result.analysisAspectRatio,
                     isCalibrating = state.stage == ParentCameraStage.Countdown &&
                         !jumpCounter.isCalibrationReady(),
                 )
@@ -254,6 +258,7 @@ class ParentCameraViewModel(
                 ),
                 analysisFps = fps,
                 inferenceMs = result.inferenceMs,
+                analysisAspectRatio = result.analysisAspectRatio,
             )
         }
         if (counterResult.count != previousCount || counterResult.estimatedCount != previousEstimatedCount) {
@@ -380,6 +385,11 @@ class ParentCameraViewModel(
         }
         viewModelScope.launch {
             repository.saveBestRecordIfNeeded(finalCount)
+        }
+        if (diagnosticsEnabled) {
+            viewModelScope.launch(Dispatchers.IO) {
+                diagnostics.exportForSession(System.currentTimeMillis())
+            }
         }
     }
 
@@ -530,6 +540,10 @@ class ParentCameraViewModel(
 
     @Suppress("UNUSED_PARAMETER")
     private fun logJumpSession(message: String) = Unit
+
+    private companion object {
+        const val DIAGNOSTICS_DIR = "jump_diagnostics"
+    }
 
     class Factory(
         private val application: Application,

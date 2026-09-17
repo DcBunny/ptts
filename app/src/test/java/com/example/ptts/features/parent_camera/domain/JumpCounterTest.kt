@@ -847,13 +847,246 @@ class JumpCounterTest {
         }
         counter.accept(standing)
         for (index in 1..20) {
-            val result = counter.accept(standing.copy(
-                timestampMs = index * 50L,
-                cameraMotion = motion.copy(reliable = index % 4 < 2),
-            ))
+            val result = counter.accept(
+                standing.copy(
+                    timestampMs = index * 50L,
+                    cameraMotion = motion.copy(reliable = index % 4 < 2),
+                ),
+            )
             assertEquals(0, result.count)
             assertEquals(JumpPhase.Grounded, result.phase)
         }
+    }
+
+    @Test
+    fun landmarkStreamIgnoresAccumulatedCameraOffset() {
+        // A background matcher only measures camera translation. The counter must not move the
+        // child's landmarks by it: doing so subtracts exactly the body displacement a jump is
+        // made of and doubles any residual error.
+        val counter = JumpCounter()
+        val motion = CameraMotion(offsetX = 0.2f, offsetY = -0.15f, available = true, reliable = true)
+        val standing = frame(0L).let { pose -> pose.copy(cameraMotion = motion) }
+        counter.accept(standing)
+        for (index in 1..20) {
+            val result = counter.accept(standing.copy(timestampMs = index * 50L))
+            assertEquals(0, result.count)
+            assertEquals(JumpPhase.Grounded, result.phase)
+        }
+    }
+
+    @Test
+    fun scoreNeverDecreasesAcrossALongPoseLoss() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+        var cycleStartMs = 80L
+        repeat(6) {
+            result = counter.accept(frame(timestampMs = cycleStartMs, footY = GroundFootY - 0.055f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 50L, footY = GroundFootY - 0.075f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 120L, footY = GroundFootY - 0.015f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 160L, footY = GroundFootY))
+            cycleStartMs += 300L
+        }
+        result = counter.accept(frame(timestampMs = cycleStartMs, footY = GroundFootY - 0.055f))
+        result = counter.accept(PoseFrame(timestampMs = cycleStartMs + 200L, landmarks = emptyMap()))
+        val countWithEstimate = result.count
+        assertTrue(countWithEstimate >= 6)
+
+        // The person leaves the frame long enough to discard the standing baseline. The score
+        // that was already shown to the user must survive that reset.
+        result = counter.accept(PoseFrame(timestampMs = cycleStartMs + 8000L, landmarks = emptyMap()))
+        assertTrue(result.count >= countWithEstimate)
+        assertEquals(TrackingQuality.NoPose, result.trackingQuality)
+    }
+
+    @Test
+    fun sustainedCameraMotionStopsBlockingTheCounterForever() {
+        val counter = JumpCounter()
+        counter.accept(frame(0L))
+        // Handheld capture keeps the background matcher unreliable; before the recovery window
+        // had a hard limit the counter stayed in "recovering" and never counted again. The
+        // window must also keep re-anchoring instead of waiting for a stillness that never comes.
+        for (index in 1..40) {
+            counter.accept(
+                frame(index * 100L).copy(
+                    cameraMotion = CameraMotion(available = true, magnitude = 0.09f),
+                ),
+            )
+        }
+        // Motion stops: the counter needs the stable window, then resumes counting.
+        counter.accept(frame(4100L))
+        counter.accept(frame(4200L))
+        assertFalse(counter.accept(frame(4400L)).recovering)
+
+        counter.accept(frame(4500L, footY = GroundFootY - 0.055f))
+        counter.accept(frame(4600L, footY = GroundFootY - 0.075f))
+        counter.accept(frame(4800L, footY = GroundFootY - 0.010f))
+        val landed = counter.accept(frame(5000L, footY = GroundFootY))
+        assertEquals(1, landed.count)
+    }
+
+    @Test
+    fun sustainedCameraMotionEventuallyRebuildsTheBaselineWhileStillMoving() {
+        val counter = JumpCounter()
+        counter.accept(frame(0L))
+        val results = (1..40).map { index ->
+            counter.accept(
+                frame(index * 100L).copy(
+                    cameraMotion = CameraMotion(available = true, magnitude = 0.09f),
+                ),
+            )
+        }
+        // The escape hatch has to fire at least once, otherwise counting stays disabled for as
+        // long as the background matcher keeps reporting unreliable motion.
+        assertTrue(results.any { !it.recovering })
+    }
+
+    @Test
+    fun slowFrameDeliveryDoesNotDiscardJumpCandidates() {
+        // 350 ms delivery is a realistic analysis rate once pose inference and video recording
+        // share a mid-range phone. It used to exceed the fixed lost-pose tolerance, so every
+        // frame discarded the jump candidate and the child was never counted.
+        val counter = JumpCounter()
+        counter.accept(frame(0L))
+        counter.accept(frame(350L))
+        counter.accept(frame(700L, footY = GroundFootY - 0.055f))
+        counter.accept(frame(1050L, footY = GroundFootY - 0.075f))
+        counter.accept(frame(1400L, footY = GroundFootY - 0.010f))
+        val landed = counter.accept(frame(1750L, footY = GroundFootY))
+        assertEquals(1, landed.count)
+    }
+
+    @Test
+    fun bouncingDuringCalibration_isRejectedUntilTheChildStandsStill() {
+        val counter = JumpCounter()
+        // The child is already bouncing while the counter is supposed to learn the standing
+        // reference. Those samples must never become a valid calibration, otherwise every
+        // later lift is measured against a moving reference.
+        var timeMs = 0L
+        repeat(30) {
+            val footY = if (it % 2 == 0) GroundFootY - 0.055f else GroundFootY
+            counter.calibrate(frame(timestampMs = timeMs, footY = footY))
+            timeMs += 50L
+        }
+        assertFalse(counter.isCalibrationReady())
+
+        // Standing still is enough to calibrate, and it takes the full window to be trusted.
+        repeat(9) {
+            counter.calibrate(frame(timestampMs = timeMs, footY = GroundFootY))
+            timeMs += 50L
+        }
+        assertFalse("a handful of still frames is not a window", counter.isCalibrationReady())
+        repeat(3) {
+            counter.calibrate(frame(timestampMs = timeMs, footY = GroundFootY))
+            timeMs += 50L
+        }
+        assertTrue(counter.isCalibrationReady())
+    }
+
+    @Test
+    fun cameraInterruption_continuousJumpsRebuildBaselineAndResumeSensitivity() {
+        for (intervalMs in listOf(33L, 50L, 67L)) {
+            val counter = JumpCounter()
+            var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+            var cycleStartMs = 80L
+            repeat(8) {
+                result = counter.accept(frame(cycleStartMs, footY = GroundFootY - 0.055f))
+                result = counter.accept(frame(cycleStartMs + intervalMs, footY = GroundFootY - 0.075f))
+                result = counter.accept(frame(cycleStartMs + intervalMs * 2, footY = GroundFootY - 0.015f))
+                result = counter.accept(frame(cycleStartMs + intervalMs * 3, footY = GroundFootY))
+                cycleStartMs += 300L
+            }
+            val confirmedBefore = result.confirmedCount
+            val shiftedGround = GroundFootY - 0.08f
+            val motion = CameraMotion(available = true, magnitude = 0.09f)
+            result = counter.accept(
+                frame(cycleStartMs + intervalMs, footY = shiftedGround - 0.055f, baseGroundY = shiftedGround)
+                    .copy(cameraMotion = motion),
+            )
+            assertTrue(result.recovering)
+            // A jump during recovery prevents a stationary shortcut and makes
+            // the counter collect a complete post-motion cycle.
+            counter.accept(frame(cycleStartMs + 180L, footY = shiftedGround, baseGroundY = shiftedGround))
+            counter.accept(frame(cycleStartMs + 230L, footY = shiftedGround - 0.055f, baseGroundY = shiftedGround))
+            counter.accept(frame(cycleStartMs + 280L, footY = shiftedGround - 0.075f, baseGroundY = shiftedGround))
+            counter.accept(frame(cycleStartMs + 350L, footY = shiftedGround - 0.015f, baseGroundY = shiftedGround))
+            counter.accept(frame(cycleStartMs + 410L, footY = shiftedGround, baseGroundY = shiftedGround))
+            counter.accept(frame(cycleStartMs + 500L, footY = shiftedGround, baseGroundY = shiftedGround))
+            counter.accept(frame(cycleStartMs + 650L, footY = shiftedGround, baseGroundY = shiftedGround))
+
+            var postStart = cycleStartMs + 700L
+            repeat(20) {
+                result = counter.accept(frame(postStart, footY = shiftedGround - 0.055f, baseGroundY = shiftedGround))
+                result = counter.accept(frame(postStart + intervalMs, footY = shiftedGround - 0.075f, baseGroundY = shiftedGround))
+                result = counter.accept(frame(postStart + intervalMs * 2, footY = shiftedGround - 0.015f, baseGroundY = shiftedGround))
+                result = counter.accept(frame(postStart + intervalMs * 3, footY = shiftedGround, baseGroundY = shiftedGround))
+                postStart += 300L
+            }
+            assertEquals("interval=${intervalMs}ms", confirmedBefore + 20, result.confirmedCount)
+        }
+    }
+
+    @Test
+    fun cameraInterruption_repeatedMovementDoesNotResetEstimateQuota() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+        var cycleStartMs = 80L
+        repeat(8) {
+            result = counter.accept(frame(cycleStartMs, footY = GroundFootY - 0.055f))
+            result = counter.accept(frame(cycleStartMs + 50L, footY = GroundFootY - 0.075f))
+            result = counter.accept(frame(cycleStartMs + 120L, footY = GroundFootY - 0.015f))
+            result = counter.accept(frame(cycleStartMs + 160L, footY = GroundFootY))
+            cycleStartMs += 300L
+        }
+        val moving = CameraMotion(available = true, magnitude = 0.09f)
+        repeat(10) { index ->
+            result = counter.accept(
+                frame(cycleStartMs + index * 90L, footY = GroundFootY, baseGroundY = GroundFootY)
+                    .copy(cameraMotion = moving),
+            )
+        }
+        assertTrue(result.estimatedCount <= 2)
+    }
+
+    @Test
+    fun cameraInterruption_withoutTrustedCadenceDoesNotInventCounts() {
+        val counter = JumpCounter()
+        counter.accept(frame(0L))
+        val motion = CameraMotion(available = true, magnitude = 0.09f)
+        var result = counter.accept(frame(100L).copy(cameraMotion = motion))
+        result = counter.accept(frame(250L))
+        result = counter.accept(frame(350L))
+        result = counter.accept(frame(450L))
+        assertEquals(0, result.count)
+        assertEquals(0, result.estimatedCount)
+    }
+
+    @Test
+    fun cameraInterruption_staticRecoveryDoesNotConfirmAndNextJumpCounts() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(0L))
+        var start = 80L
+        repeat(8) {
+            result = counter.accept(frame(start, footY = GroundFootY - 0.055f))
+            result = counter.accept(frame(start + 50L, footY = GroundFootY - 0.075f))
+            result = counter.accept(frame(start + 120L, footY = GroundFootY - 0.015f))
+            result = counter.accept(frame(start + 160L))
+            start += 300L
+        }
+        val before = result.confirmedCount
+        val shifted = GroundFootY - 0.07f
+        val moving = CameraMotion(available = true, magnitude = 0.09f)
+        counter.accept(frame(start + 20L, footY = shifted, baseGroundY = shifted).copy(cameraMotion = moving))
+        result = counter.accept(frame(start + 170L, footY = shifted, baseGroundY = shifted))
+        result = counter.accept(frame(start + 320L, footY = shifted, baseGroundY = shifted))
+        result = counter.accept(frame(start + 370L, footY = shifted, baseGroundY = shifted))
+        assertFalse(result.recovering)
+        assertEquals(before, result.confirmedCount)
+
+        result = counter.accept(frame(start + 420L, footY = shifted - 0.055f, baseGroundY = shifted))
+        result = counter.accept(frame(start + 470L, footY = shifted - 0.075f, baseGroundY = shifted))
+        result = counter.accept(frame(start + 540L, footY = shifted - 0.015f, baseGroundY = shifted))
+        result = counter.accept(frame(start + 580L, footY = shifted, baseGroundY = shifted))
+        assertEquals(before + 1, result.confirmedCount)
     }
 
     private fun runStandardJumps(

@@ -13,11 +13,14 @@ import com.google.mlkit.vision.pose.Pose
 import com.google.mlkit.vision.pose.PoseDetection
 import com.google.mlkit.vision.pose.PoseLandmark
 import com.google.mlkit.vision.pose.accurate.AccuratePoseDetectorOptions
+import java.util.concurrent.Executors
 
 class PoseFrameAnalyzer(
     private val onResult: (PoseAnalysisResult) -> Unit,
     private val onError: (Throwable) -> Unit,
 ) : ImageAnalysis.Analyzer {
+    private val analysisExecutor = Executors.newSingleThreadExecutor()
+
     private val detector = PoseDetection.getClient(
         AccuratePoseDetectorOptions.Builder()
             .setDetectorMode(AccuratePoseDetectorOptions.STREAM_MODE)
@@ -41,15 +44,24 @@ class PoseFrameAnalyzer(
         val dimensions = imageProxy.analysisDimensions()
         val motion = motionEstimator.estimate(imageProxy)
         val normalizedMotion = motion.toCameraMotion(rotation)
-        Log.i(TAG, "analyze: frame timestamp=$captureTimestampMs size=${dimensions.width}x${dimensions.height} rotation=$rotation")
+        if (VerboseLogging) {
+            Log.i(
+                TAG,
+                "analyze: frame timestamp=$captureTimestampMs " +
+                    "size=${dimensions.width}x${dimensions.height} rotation=$rotation",
+            )
+        }
 
         val inputImage = InputImage.fromMediaImage(mediaImage, rotation)
 
+        // Listeners run on the analysis executor. The default main-thread executor added the UI
+        // thread to the critical path and let a busy frame delay the next analysis frame.
         detector.process(inputImage)
-            .addOnSuccessListener { pose ->
+            .addOnSuccessListener(analysisExecutor) { pose ->
                 val inferenceMs = SystemClock.elapsedRealtime() - startedAt
-                val landmarkCount = pose.allPoseLandmarks.size
-                Log.i(TAG, "analyze: ML Kit success, landmarks=$landmarkCount inferenceMs=$inferenceMs")
+                if (VerboseLogging) {
+                    Log.i(TAG, "analyze: ML Kit success, landmarks=${pose.allPoseLandmarks.size} inferenceMs=$inferenceMs")
+                }
                 onResult(
                     PoseAnalysisResult(
                         frame = pose.toPoseFrame(
@@ -59,14 +71,16 @@ class PoseFrameAnalyzer(
                             motion = normalizedMotion,
                         ),
                         inferenceMs = inferenceMs,
+                        analysisAspectRatio = dimensions.width.toFloat() /
+                            dimensions.height.toFloat().coerceAtLeast(1f),
                     ),
                 )
             }
-            .addOnFailureListener { error ->
+            .addOnFailureListener(analysisExecutor) { error ->
                 Log.e(TAG, "analyze: ML Kit failed", error)
                 onError(error)
             }
-            .addOnCompleteListener {
+            .addOnCompleteListener(analysisExecutor) {
                 imageProxy.close()
             }
     }
@@ -74,6 +88,7 @@ class PoseFrameAnalyzer(
     fun close() {
         motionEstimator.reset()
         detector.close()
+        analysisExecutor.shutdown()
     }
 
     private fun Pose.toPoseFrame(
@@ -130,6 +145,9 @@ class PoseFrameAnalyzer(
     private companion object {
         const val TAG = "JumpDebug"
 
+        /** Per-frame logging is useful while tuning thresholds and costly in normal use. */
+        const val VerboseLogging = false
+
         val LandmarkTypes = listOf(
             BodyLandmark.LeftShoulder to PoseLandmark.LEFT_SHOULDER,
             BodyLandmark.RightShoulder to PoseLandmark.RIGHT_SHOULDER,
@@ -148,4 +166,10 @@ class PoseFrameAnalyzer(
 data class PoseAnalysisResult(
     val frame: PoseFrame,
     val inferenceMs: Long,
+    /**
+     * Aspect ratio (width / height) of the upright analysis image the landmarks were measured
+     * in. Overlays must map landmarks through the same fill-center transform as the preview,
+     * otherwise the skeleton is drawn in a different coordinate space than the camera image.
+     */
+    val analysisAspectRatio: Float = 1f,
 )
