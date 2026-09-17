@@ -4,6 +4,7 @@ data class OverlayFrameState(
     val elapsedMs: Long,
     val remainingSeconds: Int,
     val jumpCount: Int,
+    val estimatedCount: Int = 0,
 )
 
 class OverlayTimeline(states: List<OverlayFrameState>) {

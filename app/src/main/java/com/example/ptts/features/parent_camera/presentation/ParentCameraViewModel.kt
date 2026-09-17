@@ -12,6 +12,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.ptts.features.parent_camera.data.JumpCameraController
 import com.example.ptts.features.parent_camera.data.JumpRecordRepository
+import com.example.ptts.features.parent_camera.data.JumpSessionDiagnosticRecorder
 import com.example.ptts.features.parent_camera.data.OverlayFrameState
 import com.example.ptts.features.parent_camera.data.VideoOverlayProcessor
 import com.example.ptts.features.jump_session.presentation.JumpSessionDefaults
@@ -35,8 +36,12 @@ class ParentCameraViewModel(
     durationSeconds: Int,
 ) : AndroidViewModel(application) {
     private val repository = JumpRecordRepository(application)
+    private val diagnostics = JumpSessionDiagnosticRecorder(
+        enabled = (application.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0,
+    )
     private val jumpCounter = JumpCounter(
         onLog = ::logJumpSession,
+        onDiagnostic = diagnostics::record,
     )
     private val captureQualityAnalyzer = PoseCaptureQualityAnalyzer()
     private val safeDurationSeconds = durationSeconds.coerceAtLeast(JumpSessionDefaults.MinDurationSeconds)
@@ -71,6 +76,13 @@ class ParentCameraViewModel(
 
     fun setCameraController(controller: JumpCameraController) {
         cameraController = controller
+    }
+
+    /** Debug-only export hook; production recorder is disabled by default. */
+    fun exportDiagnostics(file: File) {
+        viewModelScope.launch(Dispatchers.IO) {
+            diagnostics.exportTo(file)
+        }
     }
 
     fun onCameraPermissionResult(granted: Boolean) {
@@ -111,14 +123,20 @@ class ParentCameraViewModel(
         countdownJob?.cancel()
         recordingJob?.cancel()
         videoProcessingJob?.cancel()
+        jumpCounter.reset(clearCalibration = true)
+        diagnostics.clear()
         isRecordingActive = false
         _uiState.update {
             it.copy(
                 stage = ParentCameraStage.Countdown,
                 countdownValue = 3,
                 jumpCount = 0,
+                confirmedJumpCount = 0,
+                estimatedJumpCount = 0,
                 remainingSeconds = safeDurationSeconds,
                 jumpPhase = JumpPhase.Searching,
+                isRecovering = false,
+                isCalibrating = true,
             )
         }
 
@@ -142,7 +160,8 @@ class ParentCameraViewModel(
         countdownJob?.cancel()
         recordingJob?.cancel()
         videoProcessingJob?.cancel()
-        jumpCounter.reset()
+        jumpCounter.reset(clearCalibration = true)
+        diagnostics.clear()
         captureQualityAnalyzer.reset()
         isRecordingActive = false
         lastAnalysisFrameMs = 0L
@@ -154,9 +173,13 @@ class ParentCameraViewModel(
                 countdownValue = null,
                 remainingSeconds = safeDurationSeconds,
                 jumpCount = 0,
+                confirmedJumpCount = 0,
+                estimatedJumpCount = 0,
                 trackingQuality = TrackingQuality.NoPose,
                 captureQuality = CaptureQualityState(),
                 jumpPhase = JumpPhase.Searching,
+                isRecovering = false,
+                isCalibrating = true,
                 analysisFps = 0f,
                 inferenceMs = 0L,
                 videoFile = null,
@@ -184,6 +207,9 @@ class ParentCameraViewModel(
         )
 
         if (uiState.value.stage != ParentCameraStage.Recording || !isRecordingActive) {
+            if (uiState.value.stage == ParentCameraStage.Framing || uiState.value.stage == ParentCameraStage.Countdown) {
+                jumpCounter.calibrate(frame)
+            }
             _uiState.update { state ->
                 state.copy(
                     trackingQuality = trackingQuality,
@@ -195,6 +221,8 @@ class ParentCameraViewModel(
                     ),
                     analysisFps = fps,
                     inferenceMs = result.inferenceMs,
+                    isCalibrating = state.stage == ParentCameraStage.Countdown &&
+                        !jumpCounter.isCalibrationReady(),
                 )
             }
             logJumpSession(
@@ -204,6 +232,7 @@ class ParentCameraViewModel(
         }
 
         val previousCount = uiState.value.jumpCount
+        val previousEstimatedCount = uiState.value.estimatedJumpCount
         val counterResult = jumpCounter.accept(frame)
         logJumpSession(
             "onPoseAnalysisResult: count=${counterResult.count} phase=${counterResult.phase} " +
@@ -212,9 +241,12 @@ class ParentCameraViewModel(
         _uiState.update { state ->
             state.copy(
                 jumpCount = counterResult.count,
+                confirmedJumpCount = counterResult.confirmedCount,
+                estimatedJumpCount = counterResult.estimatedCount,
                 trackingQuality = counterResult.trackingQuality,
                 captureQuality = captureQuality,
                 jumpPhase = counterResult.phase,
+                isRecovering = counterResult.recovering,
                 poseOverlay = PoseOverlay(
                     points = frame.landmarks.map { (landmark, point) ->
                         PoseOverlayPoint(landmark = landmark, x = point.x, y = point.y)
@@ -224,14 +256,14 @@ class ParentCameraViewModel(
                 inferenceMs = result.inferenceMs,
             )
         }
-        if (counterResult.count != previousCount) {
+        if (counterResult.count != previousCount || counterResult.estimatedCount != previousEstimatedCount) {
             appendOverlayState(SystemClock.elapsedRealtime() - recordingStartTimeMs)
         }
     }
 
     private fun beginRecording() {
         logJumpSession("beginRecording: duration=$safeDurationSeconds")
-        jumpCounter.reset()
+        jumpCounter.startSession()
         captureQualityAnalyzer.reset()
         lastAnalysisFrameMs = 0L
         analysisFps = 0f
@@ -244,9 +276,13 @@ class ParentCameraViewModel(
                 countdownValue = null,
                 remainingSeconds = safeDurationSeconds,
                 jumpCount = 0,
+                confirmedJumpCount = 0,
+                estimatedJumpCount = 0,
                 trackingQuality = TrackingQuality.NoPose,
                 captureQuality = CaptureQualityState(),
                 jumpPhase = JumpPhase.Searching,
+                isRecovering = false,
+                isCalibrating = false,
                 videoFile = null,
                 isFinalizingVideo = false,
             )
@@ -269,7 +305,7 @@ class ParentCameraViewModel(
         }
         logJumpSession("onRecordingStarted")
         recordingJob?.cancel()
-        jumpCounter.reset()
+        jumpCounter.startSession()
         captureQualityAnalyzer.reset()
         lastAnalysisFrameMs = 0L
         analysisFps = 0f
@@ -281,15 +317,20 @@ class ParentCameraViewModel(
                 elapsedMs = 0L,
                 remainingSeconds = safeDurationSeconds,
                 jumpCount = 0,
+                estimatedCount = 0,
             ),
         )
         _uiState.update { state ->
             state.copy(
                 remainingSeconds = safeDurationSeconds,
                 jumpCount = 0,
+                confirmedJumpCount = 0,
+                estimatedJumpCount = 0,
                 trackingQuality = TrackingQuality.NoPose,
                 captureQuality = CaptureQualityState(),
                 jumpPhase = JumpPhase.Searching,
+                isRecovering = false,
+                isCalibrating = false,
                 analysisFps = 0f,
                 inferenceMs = 0L,
             )
@@ -323,6 +364,7 @@ class ParentCameraViewModel(
                 elapsedMs = safeDurationSeconds * 1000L,
                 remainingSeconds = 0,
                 jumpCount = finalCount,
+                estimatedCount = uiState.value.estimatedJumpCount,
             ),
         )
         cameraController?.stopRecording()
@@ -431,6 +473,7 @@ class ParentCameraViewModel(
             elapsedMs = elapsedMs.coerceAtLeast(0L),
             remainingSeconds = remaining,
             jumpCount = state.jumpCount,
+            estimatedCount = state.estimatedJumpCount,
         )
         if (overlayTimeline.lastOrNull() != overlayState) {
             overlayTimeline.add(overlayState)

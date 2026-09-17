@@ -283,6 +283,14 @@ private fun CameraHeader(state: ParentCameraUiState) {
                 Spacer(modifier = Modifier.weight(1f))
                 InfoBadge(value = state.jumpCount.toString())
             }
+            if (state.estimatedJumpCount > 0) {
+                Text(
+                    text = stringResource(R.string.parent_camera_estimated_count, state.estimatedJumpCount),
+                    color = Color.White.copy(alpha = 0.78f),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.align(Alignment.End),
+                )
+            }
             Spacer(modifier = Modifier.height(12.dp))
             AnalysisStatusCard(state = state)
         }
@@ -368,7 +376,11 @@ private fun CameraControls(
 
 @Composable
 private fun AnalysisStatusCard(state: ParentCameraUiState) {
-    val guidance = when (state.captureQuality.issue) {
+    val guidance = if (state.isCalibrating) {
+        stringResource(R.string.parent_camera_analysis_calibrating)
+    } else if (state.isRecovering) {
+        stringResource(R.string.parent_camera_analysis_recovering)
+    } else when (state.captureQuality.issue) {
         CaptureQualityIssue.Good -> when (state.trackingQuality) {
             TrackingQuality.Tracking -> stringResource(R.string.parent_camera_analysis_tracking)
             TrackingQuality.NoPose -> stringResource(R.string.parent_camera_analysis_lost)
@@ -503,6 +515,13 @@ private fun SummaryCard(
             style = MaterialTheme.typography.displayLarge,
             fontWeight = FontWeight.ExtraBold,
         )
+        if (state.estimatedJumpCount > 0) {
+            Text(
+                text = stringResource(R.string.parent_camera_estimated_count, state.estimatedJumpCount),
+                color = Color.White.copy(alpha = 0.72f),
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
         Spacer(modifier = Modifier.height(14.dp))
         Row {
             ResultMetric(

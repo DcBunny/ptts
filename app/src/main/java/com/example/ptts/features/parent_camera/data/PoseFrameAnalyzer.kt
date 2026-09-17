@@ -1,9 +1,11 @@
 package com.example.ptts.features.parent_camera.data
 
 import android.util.Log
+import android.os.SystemClock
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import com.example.ptts.features.parent_camera.domain.BodyLandmark
+import com.example.ptts.features.parent_camera.domain.CameraMotion
 import com.example.ptts.features.parent_camera.domain.PoseFrame
 import com.example.ptts.features.parent_camera.domain.PosePoint
 import com.google.mlkit.vision.common.InputImage
@@ -21,6 +23,7 @@ class PoseFrameAnalyzer(
             .setDetectorMode(AccuratePoseDetectorOptions.STREAM_MODE)
             .build(),
     )
+    private val motionEstimator = CameraMotionEstimator()
 
     override fun analyze(imageProxy: ImageProxy) {
         val mediaImage = imageProxy.image
@@ -30,10 +33,15 @@ class PoseFrameAnalyzer(
             return
         }
 
-        val startedAt = System.currentTimeMillis()
+        val startedAt = SystemClock.elapsedRealtime()
+        val captureTimestampMs = (imageProxy.imageInfo.timestamp / 1_000_000L)
+            .takeIf { it > 0L }
+            ?: startedAt
         val rotation = imageProxy.imageInfo.rotationDegrees
         val dimensions = imageProxy.analysisDimensions()
-        Log.i(TAG, "analyze: frame startedAt=$startedAt size=${dimensions.width}x${dimensions.height} rotation=$rotation")
+        val motion = motionEstimator.estimate(imageProxy)
+        val normalizedMotion = motion.toCameraMotion(rotation)
+        Log.i(TAG, "analyze: frame timestamp=$captureTimestampMs size=${dimensions.width}x${dimensions.height} rotation=$rotation")
 
         val inputImage = InputImage.fromMediaImage(mediaImage, rotation)
 
@@ -45,9 +53,10 @@ class PoseFrameAnalyzer(
                 onResult(
                     PoseAnalysisResult(
                         frame = pose.toPoseFrame(
-                            timestampMs = startedAt,
+                            timestampMs = captureTimestampMs,
                             imageWidth = dimensions.width,
                             imageHeight = dimensions.height,
+                            motion = normalizedMotion,
                         ),
                         inferenceMs = inferenceMs,
                     ),
@@ -63,6 +72,7 @@ class PoseFrameAnalyzer(
     }
 
     fun close() {
+        motionEstimator.reset()
         detector.close()
     }
 
@@ -70,6 +80,7 @@ class PoseFrameAnalyzer(
         timestampMs: Long,
         imageWidth: Int,
         imageHeight: Int,
+        motion: CameraMotion,
     ): PoseFrame {
         val landmarks = LandmarkTypes.mapNotNull { (bodyLandmark, mlKitType) ->
             val landmark = getPoseLandmark(mlKitType) ?: return@mapNotNull null
@@ -83,6 +94,23 @@ class PoseFrameAnalyzer(
         return PoseFrame(
             timestampMs = timestampMs,
             landmarks = landmarks,
+            cameraMotion = motion,
+        )
+    }
+
+    private fun CameraMotionEstimator.MotionEstimate.toCameraMotion(rotation: Int): CameraMotion {
+        val (x, y) = when (rotation) {
+            90 -> -offsetY to offsetX
+            180 -> -offsetX to -offsetY
+            270 -> offsetY to -offsetX
+            else -> offsetX to offsetY
+        }
+        return CameraMotion(
+            offsetX = x,
+            offsetY = y,
+            available = true,
+            reliable = reliable,
+            magnitude = magnitude,
         )
     }
 

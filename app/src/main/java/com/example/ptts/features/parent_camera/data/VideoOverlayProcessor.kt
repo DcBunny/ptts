@@ -484,6 +484,7 @@ private class TextureRenderer(
         val visualState = OverlayVisualState(
             remainingSeconds = state.remainingSeconds,
             jumpCount = state.jumpCount,
+            estimatedCount = state.estimatedCount,
         )
         if (visualState != lastOverlayVisualState) {
             updateOverlayTexture(state)
@@ -544,7 +545,11 @@ private class TextureRenderer(
             height = badgeHeight,
             cornerRadius = cornerRadius,
             textSize = textSize,
-            text = state.jumpCount.toString(),
+            text = if (state.estimatedCount > 0) {
+                "${state.jumpCount}(${state.estimatedCount}估)"
+            } else {
+                state.jumpCount.toString()
+            },
         )
 
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTextureId)
@@ -614,6 +619,7 @@ private class TextureRenderer(
     private data class OverlayVisualState(
         val remainingSeconds: Int,
         val jumpCount: Int,
+        val estimatedCount: Int,
     )
 }
 

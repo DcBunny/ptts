@@ -2,6 +2,7 @@ package com.example.ptts.features.parent_camera.domain
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class JumpCounterTest {
@@ -607,6 +608,88 @@ class JumpCounterTest {
 
         assertEquals(JumpPhase.Grounded, result.phase)
         assertEquals(0, result.count)
+    }
+
+    @Test
+    fun landingPhase_timeoutReturnsToGrounded() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+
+        result = counter.accept(frame(timestampMs = 100L, footY = GroundFootY - 0.060f))
+        result = counter.accept(frame(timestampMs = 170L, footY = GroundFootY - 0.075f))
+        result = counter.accept(frame(timestampMs = 250L, footY = GroundFootY - 0.010f))
+        assertEquals(JumpPhase.Landing, result.phase)
+
+        result = counter.accept(frame(timestampMs = 600L, footY = GroundFootY - 0.026f))
+
+        assertEquals(JumpPhase.Grounded, result.phase)
+        assertEquals(0, result.count)
+    }
+
+    @Test
+    fun duplicateTimestamp_isIgnored() {
+        val counter = JumpCounter()
+        val first = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+        val duplicate = counter.accept(frame(timestampMs = 0L, footY = GroundFootY - 0.080f))
+
+        assertEquals(first.count, duplicate.count)
+        assertEquals(first.phase, duplicate.phase)
+    }
+
+    @Test
+    fun longValidFrameGap_dropsExpiredCandidate() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+        result = counter.accept(frame(timestampMs = 100L, footY = GroundFootY - 0.070f))
+
+        result = counter.accept(frame(timestampMs = 500L, footY = GroundFootY))
+
+        assertEquals(0, result.count)
+        assertEquals(JumpPhase.Grounded, result.phase)
+        assertFalse(result.recovering)
+    }
+
+    @Test
+    fun shortPoseLoss_preservesCandidateAndRecoversOnLanding() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+        result = counter.accept(frame(timestampMs = 100L, footY = GroundFootY - 0.060f))
+        result = counter.accept(frame(timestampMs = 165L, footY = GroundFootY - 0.072f))
+        assertEquals(JumpPhase.Airborne, result.phase)
+
+        result = counter.accept(PoseFrame(timestampMs = 210L, landmarks = emptyMap()))
+        assertEquals(JumpPhase.Airborne, result.phase)
+        assertTrue(result.recovering)
+
+        result = counter.accept(frame(timestampMs = 260L, footY = GroundFootY))
+
+        assertEquals(1, result.count)
+        assertFalse(result.recovering)
+    }
+
+    @Test
+    fun stableCadence_estimatesBoundedGapAndReconcilesLanding() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L, footY = GroundFootY))
+        var cycleStartMs = 80L
+        repeat(6) {
+            result = counter.accept(frame(timestampMs = cycleStartMs, footY = GroundFootY - 0.055f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 50L, footY = GroundFootY - 0.075f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 120L, footY = GroundFootY - 0.015f))
+            result = counter.accept(frame(timestampMs = cycleStartMs + 160L, footY = GroundFootY))
+            cycleStartMs += 300L
+        }
+        assertEquals(6, result.confirmedCount)
+
+        result = counter.accept(frame(timestampMs = cycleStartMs, footY = GroundFootY - 0.055f))
+        result = counter.accept(PoseFrame(timestampMs = cycleStartMs + 200L, landmarks = emptyMap()))
+        assertTrue(result.estimatedCount <= 2)
+        assertTrue(result.estimatedThisFrame)
+
+        result = counter.accept(frame(timestampMs = cycleStartMs + 240L, footY = GroundFootY))
+        assertEquals(7, result.count)
+        assertEquals(7, result.confirmedCount)
+        assertEquals(0, result.estimatedCount)
     }
 
     private fun runStandardJumps(
