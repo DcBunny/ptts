@@ -5,6 +5,14 @@ data class PoseFrame(
     val landmarks: Map<BodyLandmark, PosePoint>,
     /** Cumulative camera translation in normalized image coordinates. */
     val cameraMotion: CameraMotion = CameraMotion(),
+    /** Brightness sampled from the same analysis frame as [landmarks]. */
+    val lightMetrics: FrameLightMetrics? = null,
+    /** Debug-only stage label supplied by the recording coordinator. */
+    val sessionStage: String? = null,
+    /** Debug/UI state copied in by the recording coordinator. */
+    val autoLowLightState: AutoLowLightState? = null,
+    val autoLowLightLevel: Int? = null,
+    val autoLowLightReason: String? = null,
 )
 
 data class PosePoint(
@@ -44,6 +52,7 @@ enum class JumpPhase {
 
 enum class TrackingQuality {
     NoPose,
+    UnreliablePose,
     PartialBody,
     Tracking,
 }
@@ -86,4 +95,15 @@ data class JumpDiagnostic(
     val typicalWorstFrameIntervalMs: Long? = null,
     /** Learned typical jump amplitude; null until real jumps have been observed. */
     val adaptivePeakLift: Float? = null,
+    /** Raw pose input for debug replay; empty in production because diagnostics are disabled. */
+    val landmarks: Map<BodyLandmark, PosePoint> = emptyMap(),
+    val cameraMotion: CameraMotion = CameraMotion(),
+    val inputQuality: String? = null,
+    val bodySignal: String? = null,
+    val footSignal: String? = null,
+    val sessionStage: String? = null,
+    val lightMetrics: FrameLightMetrics? = null,
+    val autoLowLightState: AutoLowLightState? = null,
+    val autoLowLightLevel: Int? = null,
+    val autoLowLightReason: String? = null,
 )

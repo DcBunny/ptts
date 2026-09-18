@@ -63,6 +63,7 @@ import com.example.ptts.features.parent_camera.data.PoseAnalysisResult
 import com.example.ptts.features.parent_camera.data.PoseFrameAnalyzer
 import com.example.ptts.features.parent_camera.domain.BodyLandmark
 import com.example.ptts.features.parent_camera.domain.TrackingQuality
+import com.example.ptts.features.parent_camera.domain.AutoLowLightState
 import com.example.ptts.features.parent_camera.presentation.AnalysisAspectRatioDefault
 import com.example.ptts.features.parent_camera.presentation.CaptureQualityIssue
 import com.example.ptts.features.parent_camera.presentation.ParentCameraError
@@ -125,6 +126,8 @@ fun ParentCameraScreen(
         onRecordingStarted = viewModel::onRecordingStarted,
         onRecordingFinalized = viewModel::onRecordingFinalized,
         onPoseFrame = viewModel::onPoseAnalysisResult,
+        onAutoLowLightCapability = viewModel::onAutoLowLightCapability,
+        onAutoLowLightCommandResult = viewModel::onAutoLowLightCommandResult,
         modifier = modifier,
     )
 
@@ -148,6 +151,8 @@ private fun ParentCameraContent(
     onRecordingStarted: () -> Unit,
     onRecordingFinalized: (Result<java.io.File>) -> Unit,
     onPoseFrame: (PoseAnalysisResult) -> Unit,
+    onAutoLowLightCapability: (com.example.ptts.features.parent_camera.domain.AutoLowLightCapability) -> Unit,
+    onAutoLowLightCommandResult: (com.example.ptts.features.parent_camera.domain.AutoLowLightCommandResult) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -162,6 +167,8 @@ private fun ParentCameraContent(
                 onRecordingStarted = onRecordingStarted,
                 onRecordingFinalized = onRecordingFinalized,
                 onPoseFrame = onPoseFrame,
+                onAutoLowLightCapability = onAutoLowLightCapability,
+                onAutoLowLightCommandResult = onAutoLowLightCommandResult,
             )
         } else {
             PermissionBackground()
@@ -242,6 +249,8 @@ private fun CameraPreview(
     onRecordingStarted: () -> Unit,
     onRecordingFinalized: (Result<java.io.File>) -> Unit,
     onPoseFrame: (PoseAnalysisResult) -> Unit,
+    onAutoLowLightCapability: (com.example.ptts.features.parent_camera.domain.AutoLowLightCapability) -> Unit,
+    onAutoLowLightCommandResult: (com.example.ptts.features.parent_camera.domain.AutoLowLightCommandResult) -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -268,6 +277,8 @@ private fun CameraPreview(
             onError = onCameraError,
             onRecordingStarted = onRecordingStarted,
             onRecordingFinalized = onRecordingFinalized,
+            onAutoLowLightCapability = onAutoLowLightCapability,
+            onAutoLowLightCommandResult = onAutoLowLightCommandResult,
         )
         controller.start()
         onControllerReady(controller)
@@ -303,25 +314,48 @@ private fun CameraHeader(state: ParentCameraUiState) {
             modifier = Modifier.fillMaxWidth(),
             contentAlignment = Alignment.TopCenter,
         ) {
-            Row(
-                modifier = Modifier
-                    .background(CameraPanelLight, RoundedCornerShape(22.dp))
-                    .padding(horizontal = 18.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.AccessibilityNew,
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.size(20.dp),
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = stringResource(R.string.parent_camera_guide),
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Bold,
-                )
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Row(
+                    modifier = Modifier
+                        .background(CameraPanelLight, RoundedCornerShape(22.dp))
+                        .padding(horizontal = 18.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AccessibilityNew,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = stringResource(R.string.parent_camera_guide),
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                when (state.autoLowLightState) {
+                    AutoLowLightState.Normal -> Unit
+                    AutoLowLightState.Adjusting -> Text(
+                        text = stringResource(R.string.parent_camera_auto_light_adjusting),
+                        color = Color(0xFFFFD180),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                    AutoLowLightState.Enhanced -> Text(
+                        text = stringResource(R.string.parent_camera_auto_light_enabled),
+                        color = Color(0xFFFFD180),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                    AutoLowLightState.TooDark -> Text(
+                        text = stringResource(R.string.parent_camera_auto_light_too_dark),
+                        color = Color(0xFFFFD180),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
             }
         }
     }
@@ -388,14 +422,28 @@ private fun AnalysisStatusCard(state: ParentCameraUiState) {
         CaptureQualityIssue.Good -> when (state.trackingQuality) {
             TrackingQuality.Tracking -> stringResource(R.string.parent_camera_analysis_tracking)
             TrackingQuality.NoPose -> stringResource(R.string.parent_camera_analysis_lost)
+            TrackingQuality.UnreliablePose -> stringResource(R.string.parent_camera_analysis_unreliable)
             TrackingQuality.PartialBody -> stringResource(R.string.parent_camera_analysis_waiting)
         }
         CaptureQualityIssue.NoPose -> stringResource(R.string.parent_camera_analysis_lost)
+        CaptureQualityIssue.UnreliablePose -> stringResource(R.string.parent_camera_analysis_unreliable)
         CaptureQualityIssue.PartialBody -> stringResource(R.string.parent_camera_analysis_waiting)
         CaptureQualityIssue.TooFar -> stringResource(R.string.parent_camera_analysis_too_far)
         CaptureQualityIssue.EdgeClipped -> stringResource(R.string.parent_camera_analysis_edge_clipped)
         CaptureQualityIssue.LowLightOrBlur -> stringResource(R.string.parent_camera_analysis_low_light)
         CaptureQualityIssue.Shaky -> stringResource(R.string.parent_camera_analysis_shaky)
+    }
+    val countStatus = when {
+        state.isRecovering -> stringResource(R.string.parent_camera_analysis_recovery_status)
+        state.trackingQuality == TrackingQuality.Tracking -> stringResource(R.string.parent_camera_analysis_counting)
+        state.trackingQuality == TrackingQuality.NoPose -> stringResource(R.string.parent_camera_analysis_paused)
+        else -> stringResource(R.string.parent_camera_analysis_tolerating)
+    }
+    val autoLightStatus = when (state.autoLowLightState) {
+        AutoLowLightState.Normal -> null
+        AutoLowLightState.Adjusting -> stringResource(R.string.parent_camera_auto_light_adjusting)
+        AutoLowLightState.Enhanced -> stringResource(R.string.parent_camera_auto_light_enabled)
+        AutoLowLightState.TooDark -> stringResource(R.string.parent_camera_auto_light_too_dark)
     }
     Row(
         modifier = Modifier
@@ -405,13 +453,30 @@ private fun AnalysisStatusCard(state: ParentCameraUiState) {
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = guidance,
-            modifier = Modifier.weight(1f),
-            color = Color.White,
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.Bold,
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = guidance,
+                color = Color.White,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = countStatus,
+                color = Color.White.copy(alpha = 0.68f),
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            autoLightStatus?.let { message ->
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = message,
+                    color = Color(0xFFFFD180),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
         Text(
             text = stringResource(
                 R.string.parent_camera_analysis_metrics,
@@ -663,8 +728,9 @@ private fun PoseOverlayCanvas(
             val startPoint = pointsByLandmark[start]
             val endPoint = pointsByLandmark[end]
             if (startPoint != null && endPoint != null) {
+                val confidence = minOf(startPoint.confidence, endPoint.confidence).coerceIn(0f, 1f)
                 drawLine(
-                    color = CameraAccent.copy(alpha = 0.88f),
+                    color = CameraAccent.copy(alpha = (0.18f + 0.70f * confidence).coerceIn(0.18f, 0.88f)),
                     start = toCanvas(startPoint.x, startPoint.y),
                     end = toCanvas(endPoint.x, endPoint.y),
                     strokeWidth = 5.dp.toPx(),
@@ -673,9 +739,10 @@ private fun PoseOverlayCanvas(
             }
         }
         overlay.points.forEach { point ->
+            val confidence = point.confidence.coerceIn(0f, 1f)
             drawCircle(
-                color = Color(0xFFE3FFF8),
-                radius = 5.dp.toPx(),
+                color = Color(0xFFE3FFF8).copy(alpha = (0.22f + 0.78f * confidence).coerceIn(0.22f, 1f)),
+                radius = (3.5f + 1.5f * confidence).dp.toPx(),
                 center = toCanvas(point.x, point.y),
             )
         }
@@ -750,6 +817,8 @@ private fun ParentCameraScreenPreview() {
             onRecordingStarted = {},
             onRecordingFinalized = { _ -> },
             onPoseFrame = { _ -> },
+            onAutoLowLightCapability = { _ -> },
+            onAutoLowLightCommandResult = { _ -> },
         )
     }
 }

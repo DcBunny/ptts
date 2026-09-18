@@ -17,6 +17,10 @@ import com.example.ptts.features.parent_camera.data.OverlayFrameState
 import com.example.ptts.features.parent_camera.data.VideoOverlayProcessor
 import com.example.ptts.features.jump_session.presentation.JumpSessionDefaults
 import com.example.ptts.features.parent_camera.data.PoseAnalysisResult
+import com.example.ptts.features.parent_camera.domain.AutoLowLightCapability
+import com.example.ptts.features.parent_camera.domain.AutoLowLightCommandResult
+import com.example.ptts.features.parent_camera.domain.AutoLowLightState
+import com.example.ptts.features.parent_camera.domain.AutoLowLightStrategy
 import com.example.ptts.features.parent_camera.domain.JumpCounter
 import com.example.ptts.features.parent_camera.domain.JumpPhase
 import com.example.ptts.features.parent_camera.domain.TrackingQuality
@@ -47,6 +51,7 @@ class ParentCameraViewModel(
         onDiagnostic = diagnostics::record,
     )
     private val captureQualityAnalyzer = PoseCaptureQualityAnalyzer()
+    private val autoLowLightStrategy = AutoLowLightStrategy()
     private val safeDurationSeconds = durationSeconds.coerceAtLeast(JumpSessionDefaults.MinDurationSeconds)
     private val _uiState = MutableStateFlow(
         ParentCameraUiState(
@@ -79,6 +84,36 @@ class ParentCameraViewModel(
 
     fun setCameraController(controller: JumpCameraController) {
         cameraController = controller
+    }
+
+    fun onAutoLowLightCapability(capability: AutoLowLightCapability) {
+        autoLowLightStrategy.setCapability(capability)
+        _uiState.update { state ->
+            state.copy(
+                autoLowLightState = autoLowLightStrategy.state,
+                autoLowLightLevel = autoLowLightStrategy.exposureLevel,
+                autoLowLightReason = autoLowLightStrategy.lastReason,
+            )
+        }
+        logJumpSession(
+            "auto low-light capability: boost=${capability.lowLightBoostSupported} " +
+                "exposure=${capability.exposureCompensationRange}",
+        )
+    }
+
+    fun onAutoLowLightCommandResult(result: AutoLowLightCommandResult) {
+        autoLowLightStrategy.onCommandResult(result)
+        _uiState.update { state ->
+            state.copy(
+                autoLowLightState = autoLowLightStrategy.state,
+                autoLowLightLevel = autoLowLightStrategy.exposureLevel,
+                autoLowLightReason = autoLowLightStrategy.lastReason,
+            )
+        }
+        logJumpSession(
+            "auto low-light command=${result.action} success=${result.success} " +
+                "error=${result.error ?: ""}",
+        )
     }
 
     /** Debug-only export hook; production recorder is disabled by default. */
@@ -127,6 +162,8 @@ class ParentCameraViewModel(
         recordingJob?.cancel()
         videoProcessingJob?.cancel()
         jumpCounter.reset(clearCalibration = true)
+        autoLowLightStrategy.reset()
+        cameraController?.restoreAutoLowLight()
         diagnostics.clear()
         isRecordingActive = false
         _uiState.update {
@@ -140,6 +177,9 @@ class ParentCameraViewModel(
                 jumpPhase = JumpPhase.Searching,
                 isRecovering = false,
                 isCalibrating = true,
+                autoLowLightState = AutoLowLightState.Normal,
+                autoLowLightLevel = 0,
+                autoLowLightReason = "",
             )
         }
 
@@ -164,6 +204,8 @@ class ParentCameraViewModel(
         recordingJob?.cancel()
         videoProcessingJob?.cancel()
         jumpCounter.reset(clearCalibration = true)
+        autoLowLightStrategy.reset()
+        cameraController?.restoreAutoLowLight()
         diagnostics.clear()
         captureQualityAnalyzer.reset()
         isRecordingActive = false
@@ -183,6 +225,9 @@ class ParentCameraViewModel(
                 jumpPhase = JumpPhase.Searching,
                 isRecovering = false,
                 isCalibrating = true,
+                autoLowLightState = AutoLowLightState.Normal,
+                autoLowLightLevel = 0,
+                autoLowLightReason = "",
                 analysisFps = 0f,
                 inferenceMs = 0L,
                 videoFile = null,
@@ -193,19 +238,40 @@ class ParentCameraViewModel(
     }
 
     fun onPoseAnalysisResult(result: PoseAnalysisResult) {
-        val frame = result.frame
-        val landmarkCount = frame.landmarks.size
-        val trackingQuality = if (frame.landmarks.isEmpty()) {
-            TrackingQuality.NoPose
-        } else {
-            TrackingQuality.Tracking
+        val baseFrame = result.frame.copy(sessionStage = uiState.value.stage.name)
+        val landmarkCount = baseFrame.landmarks.size
+        val fps = updateFps(baseFrame.timestampMs)
+        val captureQuality = captureQualityAnalyzer.analyze(baseFrame)
+        val framingTrackingQuality = when {
+            baseFrame.landmarks.isEmpty() -> TrackingQuality.NoPose
+            captureQuality.issue == CaptureQualityIssue.NoPose -> TrackingQuality.NoPose
+            captureQuality.issue == CaptureQualityIssue.LowLightOrBlur ||
+                captureQuality.issue == CaptureQualityIssue.UnreliablePose -> TrackingQuality.UnreliablePose
+            captureQuality.issue == CaptureQualityIssue.PartialBody -> TrackingQuality.PartialBody
+            else -> TrackingQuality.Tracking
         }
-        val fps = updateFps(frame.timestampMs)
-        val captureQuality = captureQualityAnalyzer.analyze(frame)
+
+        val lightMetrics = result.lightMetrics ?: baseFrame.lightMetrics
+        val validPoseForLight = baseFrame.landmarks.values.count { it.confidence >= 0.35f } >= 3 &&
+            captureQuality.issue != CaptureQualityIssue.NoPose
+        val lightDecision = lightMetrics?.let {
+            autoLowLightStrategy.onFrame(
+                metrics = it,
+                validPose = validPoseForLight,
+                analysisFps = fps,
+            )
+        }
+        val frame = baseFrame.copy(
+            lightMetrics = lightMetrics,
+            autoLowLightState = autoLowLightStrategy.state,
+            autoLowLightLevel = autoLowLightStrategy.exposureLevel,
+            autoLowLightReason = autoLowLightStrategy.lastReason,
+        )
+        cameraController?.applyAutoLowLight(lightDecision, lightMetrics)
 
         logJumpSession(
             "onPoseAnalysisResult: stage=${uiState.value.stage} landmarks=$landmarkCount " +
-                "tracking=$trackingQuality quality=${captureQuality.issue}/${captureQuality.score} " +
+                "tracking=$framingTrackingQuality quality=${captureQuality.issue}/${captureQuality.score} " +
                 "fps=${String.format("%.1f", fps)} inferenceMs=${result.inferenceMs}",
         )
 
@@ -215,11 +281,19 @@ class ParentCameraViewModel(
             }
             _uiState.update { state ->
                 state.copy(
-                    trackingQuality = trackingQuality,
+                    trackingQuality = framingTrackingQuality,
                     captureQuality = captureQuality,
+                    autoLowLightState = autoLowLightStrategy.state,
+                    autoLowLightLevel = autoLowLightStrategy.exposureLevel,
+                    autoLowLightReason = autoLowLightStrategy.lastReason,
                     poseOverlay = PoseOverlay(
                         points = frame.landmarks.map { (landmark, point) ->
-                            PoseOverlayPoint(landmark = landmark, x = point.x, y = point.y)
+                            PoseOverlayPoint(
+                                landmark = landmark,
+                                x = point.x,
+                                y = point.y,
+                                confidence = point.confidence,
+                            )
                         },
                     ),
                     analysisFps = fps,
@@ -249,11 +323,19 @@ class ParentCameraViewModel(
                 estimatedJumpCount = counterResult.estimatedCount,
                 trackingQuality = counterResult.trackingQuality,
                 captureQuality = captureQuality,
+                autoLowLightState = autoLowLightStrategy.state,
+                autoLowLightLevel = autoLowLightStrategy.exposureLevel,
+                autoLowLightReason = autoLowLightStrategy.lastReason,
                 jumpPhase = counterResult.phase,
                 isRecovering = counterResult.recovering,
                 poseOverlay = PoseOverlay(
                     points = frame.landmarks.map { (landmark, point) ->
-                        PoseOverlayPoint(landmark = landmark, x = point.x, y = point.y)
+                        PoseOverlayPoint(
+                            landmark = landmark,
+                            x = point.x,
+                            y = point.y,
+                            confidence = point.confidence,
+                        )
                     },
                 ),
                 analysisFps = fps,
@@ -290,6 +372,9 @@ class ParentCameraViewModel(
                 isCalibrating = false,
                 videoFile = null,
                 isFinalizingVideo = false,
+                autoLowLightState = autoLowLightStrategy.state,
+                autoLowLightLevel = autoLowLightStrategy.exposureLevel,
+                autoLowLightReason = autoLowLightStrategy.lastReason,
             )
         }
         val started = cameraController?.startRecording() == true
@@ -373,6 +458,8 @@ class ParentCameraViewModel(
             ),
         )
         cameraController?.stopRecording()
+        cameraController?.restoreAutoLowLight()
+        autoLowLightStrategy.reset()
         logJumpSession("finishRecording: finalCount=$finalCount")
         _uiState.update { state ->
             state.copy(
@@ -536,6 +623,11 @@ class ParentCameraViewModel(
             analysisFps * 0.8f + instantFps * 0.2f
         }
         return analysisFps
+    }
+
+    override fun onCleared() {
+        cameraController?.restoreAutoLowLight()
+        super.onCleared()
     }
 
     @Suppress("UNUSED_PARAMETER")

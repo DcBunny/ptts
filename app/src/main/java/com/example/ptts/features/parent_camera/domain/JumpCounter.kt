@@ -80,6 +80,25 @@ class JumpCounter(
     private var diagnosticRejectionReason: String? = null
     private var diagnosticRecoveryStage: String? = null
     private var diagnosticRecoveryMatchedEstimate = false
+    private var diagnosticLandmarks: Map<BodyLandmark, PosePoint> = emptyMap()
+    private var diagnosticCameraMotion = CameraMotion()
+    private var diagnosticTimestampMs = 0L
+    private var diagnosticInputQuality: String? = null
+    private var diagnosticBodySignal: String? = null
+    private var diagnosticFootSignal: String? = null
+    private var diagnosticSessionStage: String? = null
+    private var diagnosticLightMetrics: FrameLightMetrics? = null
+    private var diagnosticAutoLowLightState: AutoLowLightState? = null
+    private var diagnosticAutoLowLightLevel: Int? = null
+    private var diagnosticAutoLowLightReason: String? = null
+
+    // A detector can switch from a paired ankle/hip signal to a single side or heel signal for
+    // one dark frame. Keep the previous signal around so that a source switch cannot turn a
+    // coordinate discontinuity into a fake take-off.
+    private var previousBodySignal: String? = null
+    private var previousBodySignalY: Float? = null
+    private var previousFootSignal: String? = null
+    private var previousFootSignalY: Float? = null
 
     private var calibrationBodyY: Float? = null
     private var calibrationFootY: Float? = null
@@ -118,6 +137,25 @@ class JumpCounter(
         if (seenAt != null && frame.timestampMs <= seenAt) return
         val sample = frame.toSample() ?: return
         if (sample.quality == SampleQuality.Unusable) return
+        diagnosticSampleIntervalMs = seenAt?.let { frame.timestampMs - it }
+        diagnosticRawLift = null
+        diagnosticSmoothedLift = null
+        diagnosticPeakLift = null
+        diagnosticJumpDurationMs = null
+        diagnosticRejectionReason = null
+        diagnosticRecoveryStage = null
+        diagnosticRecoveryMatchedEstimate = false
+        diagnosticLandmarks = frame.landmarks.toMap()
+        diagnosticCameraMotion = frame.cameraMotion
+        diagnosticTimestampMs = frame.timestampMs
+        diagnosticInputQuality = sample.quality.name
+        diagnosticBodySignal = sample.bodySignal
+        diagnosticFootSignal = sample.footSignal
+        diagnosticSessionStage = frame.sessionStage ?: "Calibration"
+        diagnosticLightMetrics = frame.lightMetrics
+        diagnosticAutoLowLightState = frame.autoLowLightState
+        diagnosticAutoLowLightLevel = frame.autoLowLightLevel
+        diagnosticAutoLowLightReason = frame.autoLowLightReason
         recordFrameInterval(frame.timestampMs)
         lastFrameSeenMs = frame.timestampMs
         if (calibrationStartedMs == null) calibrationStartedMs = frame.timestampMs
@@ -158,6 +196,7 @@ class JumpCounter(
         val coveredMs = newest - oldest
         calibrationReady = calibrationSamples.size >= MinCalibrationSamples &&
             coveredMs >= CalibrationWindowMs
+        emitDiagnostic(event = "calibration", recovering = false, timestampMs = frame.timestampMs)
     }
 
     private fun calibrationIsStationary(): Boolean {
@@ -238,10 +277,33 @@ class JumpCounter(
         diagnosticRejectionReason = null
         diagnosticRecoveryStage = null
         diagnosticRecoveryMatchedEstimate = false
+        diagnosticLandmarks = emptyMap()
+        diagnosticCameraMotion = CameraMotion()
+        diagnosticTimestampMs = 0L
+        diagnosticInputQuality = null
+        diagnosticBodySignal = null
+        diagnosticFootSignal = null
+        diagnosticSessionStage = null
+        diagnosticLightMetrics = null
+        diagnosticAutoLowLightState = null
+        diagnosticAutoLowLightLevel = null
+        diagnosticAutoLowLightReason = null
+        previousBodySignal = null
+        previousBodySignalY = null
+        previousFootSignal = null
+        previousFootSignalY = null
     }
 
     fun accept(frame: PoseFrame): JumpCounterResult {
         log("accept: timestamp=${frame.timestampMs} landmarks=${frame.landmarks.size}")
+        diagnosticLandmarks = frame.landmarks.toMap()
+        diagnosticCameraMotion = frame.cameraMotion
+        diagnosticTimestampMs = frame.timestampMs
+        diagnosticSessionStage = frame.sessionStage
+        diagnosticLightMetrics = frame.lightMetrics
+        diagnosticAutoLowLightState = frame.autoLowLightState
+        diagnosticAutoLowLightLevel = frame.autoLowLightLevel
+        diagnosticAutoLowLightReason = frame.autoLowLightReason
         if (lastInputMs != null && frame.timestampMs <= lastInputMs!!) {
             log("忽略重复或倒序时间戳: ${frame.timestampMs}")
             diagnosticSampleIntervalMs = null
@@ -250,6 +312,9 @@ class JumpCounter(
             diagnosticPeakLift = null
             diagnosticJumpDurationMs = null
             diagnosticRejectionReason = null
+            diagnosticInputQuality = "out_of_order"
+            diagnosticBodySignal = null
+            diagnosticFootSignal = null
             return result(emptyPoseTrackingQuality(frame), countedThisFrame = false)
         }
         recordFrameInterval(frame.timestampMs)
@@ -262,13 +327,20 @@ class JumpCounter(
         diagnosticRejectionReason = null
         diagnosticRecoveryStage = null
         diagnosticRecoveryMatchedEstimate = false
+        diagnosticInputQuality = null
+        diagnosticBodySignal = null
+        diagnosticFootSignal = null
         lastInputMs = frame.timestampMs
         val cameraUnstable = frame.cameraMotion.available && !frame.cameraMotion.reliable &&
             frame.cameraMotion.magnitude >= CameraMotionRecoveryThreshold
         if (cameraUnstable) {
             beginRecovery(frame.timestampMs, "camera_motion")
         }
-        val sample = frame.toSample()
+        var sample = frame.toSample()
+        diagnosticInputQuality = sample?.quality?.name ?: SampleQuality.Unusable.name
+        sample = sample?.let { stabilizeSignalSwitch(it) }
+        diagnosticBodySignal = sample?.bodySignal
+        diagnosticFootSignal = sample?.footSignal
         if (sample == null || sample.quality == SampleQuality.Unusable) {
             if (cameraRecoveryPending) {
                 val lostMs = lastValidMs?.let { frame.timestampMs - it } ?: Long.MAX_VALUE
@@ -753,6 +825,10 @@ class JumpCounter(
             resetRecoverySampling()
             recoveryEstimateEnabled = false
             poseLossStartedInJump = false
+            previousBodySignal = null
+            previousBodySignalY = null
+            previousFootSignal = null
+            previousFootSignalY = null
             estimateWindowStartMs = null
             estimatedInCurrentGap = 0
             // Estimated events are intentionally preserved so the displayed score never
@@ -822,19 +898,31 @@ class JumpCounter(
         )
         // Building the diagnostic snapshot allocates several objects and formats nothing
         // cheaply; when no sink is attached (release builds) the work is skipped entirely.
+        emitDiagnostic(
+            event = when {
+                estimatedThisFrame -> "estimated"
+                countedThisFrame -> "counted"
+                else -> "sample"
+            },
+            recovering = recovering,
+        )
+        return result
+    }
+
+    private fun emitDiagnostic(
+        event: String,
+        recovering: Boolean,
+        timestampMs: Long? = null,
+    ) {
         onDiagnostic?.invoke(
             JumpDiagnostic(
-                timestampMs = lastInputMs ?: 0L,
+                timestampMs = timestampMs ?: diagnosticTimestampMs.takeIf { it > 0L } ?: lastInputMs ?: 0L,
                 phase = phase,
                 count = count,
                 confirmedCount = confirmedCount,
                 estimatedCount = estimatedCount,
                 recovering = recovering,
-                event = when {
-                    estimatedThisFrame -> "estimated"
-                    countedThisFrame -> "counted"
-                    else -> "sample"
-                },
+                event = event,
                 sampleIntervalMs = diagnosticSampleIntervalMs,
                 rawLift = diagnosticRawLift,
                 smoothedLift = diagnosticSmoothedLift,
@@ -855,9 +943,18 @@ class JumpCounter(
                 medianFrameIntervalMs = medianFrameMs,
                 typicalWorstFrameIntervalMs = typicalWorstFrameMs,
                 adaptivePeakLift = adaptivePeakLift,
+                landmarks = diagnosticLandmarks,
+                cameraMotion = diagnosticCameraMotion,
+                inputQuality = diagnosticInputQuality,
+                bodySignal = diagnosticBodySignal,
+                footSignal = diagnosticFootSignal,
+                sessionStage = diagnosticSessionStage,
+                lightMetrics = diagnosticLightMetrics,
+                autoLowLightState = diagnosticAutoLowLightState,
+                autoLowLightLevel = diagnosticAutoLowLightLevel,
+                autoLowLightReason = diagnosticAutoLowLightReason,
             ),
         )
-        return result
     }
 
     private fun updateGroundBaseline(
@@ -1199,6 +1296,12 @@ class JumpCounter(
             scale = scaleResult.scale,
             measuredScaleReliable = scaleResult.reliable,
         )
+        val bodySignal = when {
+            hipMid != null && shoulderMid != null -> "hip+shoulder"
+            hipMid != null && leftHip != null && rightHip != null -> "hip_pair"
+            hipMid != null -> "hip_single"
+            else -> null
+        }
 
         return PoseSample(
             bodyY = bodyY,
@@ -1206,7 +1309,49 @@ class JumpCounter(
             scale = scaleResult.scale,
             quality = quality,
             measuredScaleReliable = scaleResult.reliable,
+            bodySignal = bodySignal,
+            footSignal = footPair?.source,
         )
+    }
+
+    private fun stabilizeSignalSwitch(sample: PoseSample): PoseSample {
+        var bodyY = sample.bodyY
+        var footY = sample.footY
+        var reanchored = false
+        if (sample.bodyY != null && previousBodySignalY != null &&
+            sample.bodySignal != null && previousBodySignal != null &&
+            sample.bodySignal != previousBodySignal &&
+            abs(sample.bodyY - previousBodySignalY!!) > MaxSignalSwitchDelta &&
+            phase == JumpPhase.Grounded && !cameraRecoveryPending
+        ) {
+            bodyY = smooth(previousBodySignalY!!, sample.bodyY, SignalSwitchSmoothing)
+            reanchored = true
+        }
+        if (sample.footY != null && previousFootSignalY != null &&
+            sample.footSignal != null && previousFootSignal != null &&
+            sample.footSignal != previousFootSignal &&
+            abs(sample.footY - previousFootSignalY!!) > MaxSignalSwitchDelta &&
+            phase == JumpPhase.Grounded && !cameraRecoveryPending
+        ) {
+            footY = smooth(previousFootSignalY!!, sample.footY, SignalSwitchSmoothing)
+            reanchored = true
+        }
+        if (reanchored) {
+            diagnosticRejectionReason = "signal_switch_reanchored"
+        }
+        bodyY?.let {
+            previousBodySignal = sample.bodySignal
+            previousBodySignalY = it
+        }
+        footY?.let {
+            previousFootSignal = sample.footSignal
+            previousFootSignalY = it
+        }
+        return if (bodyY == sample.bodyY && footY == sample.footY) {
+            sample
+        } else {
+            sample.copy(bodyY = bodyY, footY = footY)
+        }
     }
 
     private fun PoseSample.toFeatures(
@@ -1318,8 +1463,37 @@ class JumpCounter(
             leftY = leftFootY,
             rightY = rightFootY,
             spread = if (leftFootY != null && rightFootY != null) abs(leftFootY - rightFootY) else 0f,
+            source = footSignalSource(leftAnkle, leftHeel, rightAnkle, rightHeel),
         )
     }
+
+    private fun footSignalSource(
+        leftAnkle: PosePoint?,
+        leftHeel: PosePoint?,
+        rightAnkle: PosePoint?,
+        rightHeel: PosePoint?,
+    ): String {
+        val left = when {
+            leftAnkle.isUsableFoot() && leftHeel.isUsableFoot() -> "ankle+heel"
+            leftAnkle.isUsableFoot() -> "ankle"
+            leftHeel.isUsableFoot() -> "heel"
+            else -> null
+        }
+        val right = when {
+            rightAnkle.isUsableFoot() && rightHeel.isUsableFoot() -> "ankle+heel"
+            rightAnkle.isUsableFoot() -> "ankle"
+            rightHeel.isUsableFoot() -> "heel"
+            else -> null
+        }
+        return when {
+            left != null && right != null -> "left_$left|right_$right"
+            left != null -> "left_$left"
+            right != null -> "right_$right"
+            else -> "none"
+        }
+    }
+
+    private fun PosePoint?.isUsableFoot(): Boolean = this?.confidence?.let { it >= MinFootConfidence } == true
 
     private fun footYOrNull(
         ankle: PosePoint?,
@@ -1479,7 +1653,7 @@ class JumpCounter(
         maxOf(MaxRecoveryDurationMs, recoveryWindowDurationMs * 2L)
 
     private fun emptyPoseTrackingQuality(frame: PoseFrame): TrackingQuality =
-        if (frame.landmarks.isEmpty()) TrackingQuality.NoPose else TrackingQuality.PartialBody
+        if (frame.landmarks.isEmpty()) TrackingQuality.NoPose else TrackingQuality.UnreliablePose
 
     private fun log(message: String) {
         onLog?.invoke("[JumpCounter] $message")
@@ -1491,9 +1665,14 @@ class JumpCounter(
         val scale: Float,
         val quality: SampleQuality,
         val measuredScaleReliable: Boolean,
+        val bodySignal: String? = null,
+        val footSignal: String? = null,
     ) {
         val trackingQuality: TrackingQuality
-            get() = if (quality == SampleQuality.Good) TrackingQuality.Tracking else TrackingQuality.PartialBody
+            get() = when (quality) {
+                SampleQuality.Good -> TrackingQuality.Tracking
+                SampleQuality.Poor, SampleQuality.Unusable -> TrackingQuality.UnreliablePose
+            }
     }
 
     private enum class SampleQuality {
@@ -1522,6 +1701,7 @@ class JumpCounter(
         val leftY: Float?,
         val rightY: Float?,
         val spread: Float,
+        val source: String,
     )
 
     private data class ScaleResult(
@@ -1541,6 +1721,8 @@ class JumpCounter(
         const val MinBodyScale = 0.08f
         const val FallbackBodyScale = 0.27f
         const val MaxFootDisagreement = 0.20f
+        const val MaxSignalSwitchDelta = 0.08f
+        const val SignalSwitchSmoothing = 0.35f
 
         const val RisingThreshold = 0.030f
         const val AirborneThreshold = 0.044f

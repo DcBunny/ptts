@@ -184,6 +184,73 @@ class JumpCounterTest {
     }
 
     @Test
+    fun diagnosticsCapturePoseInputAndSignalSelection() {
+        val diagnostics = mutableListOf<JumpDiagnostic>()
+        val counter = JumpCounter(onDiagnostic = diagnostics::add)
+        val motion = CameraMotion(
+            offsetX = 0.02f,
+            offsetY = -0.01f,
+            available = true,
+            reliable = false,
+            magnitude = 0.03f,
+        )
+
+        counter.accept(
+            frame(timestampMs = 0L).copy(
+                cameraMotion = motion,
+                sessionStage = "Recording",
+            ),
+        )
+
+        val event = diagnostics.last()
+        assertEquals("Recording", event.sessionStage)
+        assertEquals(motion, event.cameraMotion)
+        assertTrue(event.landmarks.isNotEmpty())
+        assertEquals("Good", event.inputQuality)
+        assertTrue(event.bodySignal?.isNotEmpty() == true)
+        assertTrue(event.footSignal?.isNotEmpty() == true)
+    }
+
+    @Test
+    fun footSignalSwitch_doesNotCreateGhostJump() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L))
+
+        // The right foot disappears in a dark frame and the remaining side jumps to an
+        // implausible coordinate. The source-switch guard should re-anchor this sample.
+        result = counter.accept(
+            frame(
+                timestampMs = 80L,
+                leftFootY = GroundFootY - 0.20f,
+                includeRightFoot = false,
+            ),
+        )
+        result = counter.accept(frame(timestampMs = 160L))
+
+        assertEquals(0, result.count)
+        assertFalse(result.countedThisFrame)
+    }
+
+    @Test
+    fun transientLowConfidenceFrame_preservesJumpContext() {
+        val counter = JumpCounter()
+        var result = counter.accept(frame(timestampMs = 0L))
+        result = counter.accept(frame(timestampMs = 40L, footY = GroundFootY - 0.030f))
+        result = counter.accept(frame(timestampMs = 80L, footY = GroundFootY - 0.060f))
+        result = counter.accept(
+            frame(
+                timestampMs = 130L,
+                footY = GroundFootY - 0.060f,
+                confidence = 0.20f,
+            ),
+        )
+        result = counter.accept(frame(timestampMs = 220L, footY = GroundFootY))
+
+        assertEquals(1, result.count)
+        assertTrue(result.countedThisFrame)
+    }
+
+    @Test
     fun normalJumpsAtCommonSamplingIntervals_countWithoutPeakFrameAlignment() {
         for (intervalMs in listOf(33L, 50L, 67L)) {
             val counter = JumpCounter()

@@ -53,5 +53,11 @@
 
 ### 6.6 真实数据闭环
 - Debug 构建会在每次录制结束时把逐帧诊断写入 `cacheDir/jump_diagnostics/`（`JumpSessionDiagnosticRecorder.exportForSession`），保留最近 20 次。
-- 诊断格式为按行制表符分隔，字段见 `JumpSessionDiagnosticRecorder.exportTo`，包含原始/平滑 lift、峰值、拒绝原因、帧间隔统计与学习到的幅度。
+- 诊断格式为按行制表符分隔，字段见 `JumpSessionDiagnosticRecorder.exportTo`，包含原始/平滑 lift、峰值、拒绝原因、帧间隔统计、学习到的幅度、录制阶段、关键点坐标/置信度、相机运动与当前身体/脚部信号来源。
 - **调整任何阈值前，先用这些真实数据回放验证**，不要只依赖合成信号的单元测试。
+
+### 6.7 夜间自动增强
+- `FrameLightMetricsCalculator` 只读取分析帧 Y 平面，使用最近可靠的人体区域；区域过期后回退中央区域，并在采样时处理旋转、裁剪和行步长。
+- `AutoLowLightStrategy` 是无 Android 依赖的状态机：暗光持续约 1 秒才发起调整，每档观察约 2 秒，环境恢复约 3 秒后恢复原曝光。所有窗口按分析帧时间戳推进。
+- `JumpCameraController` 串行执行 CameraX 低光增强、曝光补偿和 AE 区域测光请求；系统低光增强未实际进入 ACTIVE 或异步失败时，自动回退到设备支持的曝光档位，二者不叠加。
+- 增强状态与计数状态独立展示。Debug 诊断同时记录亮度、区域、实际增强状态、曝光档位和回退原因，便于用真实夜间会话回放调参。

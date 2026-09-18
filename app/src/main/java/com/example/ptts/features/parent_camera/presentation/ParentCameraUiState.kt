@@ -4,6 +4,7 @@ import com.example.ptts.features.jump_session.presentation.JumpSessionDefaults
 import com.example.ptts.features.parent_camera.domain.JumpPhase
 import com.example.ptts.features.parent_camera.domain.BodyLandmark
 import com.example.ptts.features.parent_camera.domain.TrackingQuality
+import com.example.ptts.features.parent_camera.domain.AutoLowLightState
 
 enum class ParentCameraStage {
     Framing,
@@ -26,6 +27,9 @@ data class ParentCameraUiState(
     val jumpPhase: JumpPhase = JumpPhase.Searching,
     val isRecovering: Boolean = false,
     val isCalibrating: Boolean = false,
+    val autoLowLightState: AutoLowLightState = AutoLowLightState.Normal,
+    val autoLowLightLevel: Int = 0,
+    val autoLowLightReason: String = "",
     val guidanceText: String = "",
     val analysisFps: Float = 0f,
     val inferenceMs: Long = 0L,
@@ -49,6 +53,7 @@ data class CaptureQualityState(
 enum class CaptureQualityIssue {
     Good,
     NoPose,
+    UnreliablePose,
     PartialBody,
     TooFar,
     EdgeClipped,
@@ -70,6 +75,7 @@ data class PoseOverlayPoint(
     val landmark: BodyLandmark,
     val x: Float,
     val y: Float,
+    val confidence: Float = 1f,
 )
 
 /** 4:3 upright analysis frames are the previous default and a safe fallback. */

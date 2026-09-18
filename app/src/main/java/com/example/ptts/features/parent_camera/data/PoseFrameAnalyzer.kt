@@ -6,6 +6,7 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import com.example.ptts.features.parent_camera.domain.BodyLandmark
 import com.example.ptts.features.parent_camera.domain.CameraMotion
+import com.example.ptts.features.parent_camera.domain.FrameLightMetrics
 import com.example.ptts.features.parent_camera.domain.PoseFrame
 import com.example.ptts.features.parent_camera.domain.PosePoint
 import com.google.mlkit.vision.common.InputImage
@@ -27,6 +28,7 @@ class PoseFrameAnalyzer(
             .build(),
     )
     private val motionEstimator = CameraMotionEstimator()
+    private val lightMetricsCalculator = FrameLightMetricsCalculator()
 
     override fun analyze(imageProxy: ImageProxy) {
         val mediaImage = imageProxy.image
@@ -44,6 +46,23 @@ class PoseFrameAnalyzer(
         val dimensions = imageProxy.analysisDimensions()
         val motion = motionEstimator.estimate(imageProxy)
         val normalizedMotion = motion.toCameraMotion(rotation)
+        val lightMetrics = imageProxy.planes.firstOrNull()?.let { plane ->
+            lightMetricsCalculator.measure(
+                plane = LumaPlaneView(
+                    buffer = plane.buffer,
+                    width = imageProxy.width,
+                    height = imageProxy.height,
+                    rowStride = plane.rowStride,
+                    pixelStride = plane.pixelStride,
+                    cropLeft = imageProxy.cropRect.left,
+                    cropTop = imageProxy.cropRect.top,
+                    cropWidth = imageProxy.cropRect.width(),
+                    cropHeight = imageProxy.cropRect.height(),
+                ),
+                rotationDegrees = rotation,
+                timestampMs = captureTimestampMs,
+            )
+        }
         if (VerboseLogging) {
             Log.i(
                 TAG,
@@ -62,17 +81,21 @@ class PoseFrameAnalyzer(
                 if (VerboseLogging) {
                     Log.i(TAG, "analyze: ML Kit success, landmarks=${pose.allPoseLandmarks.size} inferenceMs=$inferenceMs")
                 }
+                val frame = pose.toPoseFrame(
+                    timestampMs = captureTimestampMs,
+                    imageWidth = dimensions.width,
+                    imageHeight = dimensions.height,
+                    motion = normalizedMotion,
+                    lightMetrics = lightMetrics,
+                )
+                lightMetricsCalculator.updatePersonRegion(frame.landmarks, captureTimestampMs)
                 onResult(
                     PoseAnalysisResult(
-                        frame = pose.toPoseFrame(
-                            timestampMs = captureTimestampMs,
-                            imageWidth = dimensions.width,
-                            imageHeight = dimensions.height,
-                            motion = normalizedMotion,
-                        ),
+                        frame = frame,
                         inferenceMs = inferenceMs,
                         analysisAspectRatio = dimensions.width.toFloat() /
                             dimensions.height.toFloat().coerceAtLeast(1f),
+                        lightMetrics = lightMetrics,
                     ),
                 )
             }
@@ -87,6 +110,7 @@ class PoseFrameAnalyzer(
 
     fun close() {
         motionEstimator.reset()
+        lightMetricsCalculator.reset()
         detector.close()
         analysisExecutor.shutdown()
     }
@@ -96,6 +120,7 @@ class PoseFrameAnalyzer(
         imageWidth: Int,
         imageHeight: Int,
         motion: CameraMotion,
+        lightMetrics: FrameLightMetrics?,
     ): PoseFrame {
         val landmarks = LandmarkTypes.mapNotNull { (bodyLandmark, mlKitType) ->
             val landmark = getPoseLandmark(mlKitType) ?: return@mapNotNull null
@@ -110,6 +135,7 @@ class PoseFrameAnalyzer(
             timestampMs = timestampMs,
             landmarks = landmarks,
             cameraMotion = motion,
+            lightMetrics = lightMetrics,
         )
     }
 
@@ -172,4 +198,5 @@ data class PoseAnalysisResult(
      * otherwise the skeleton is drawn in a different coordinate space than the camera image.
      */
     val analysisAspectRatio: Float = 1f,
+    val lightMetrics: FrameLightMetrics? = frame.lightMetrics,
 )

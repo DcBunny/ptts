@@ -1,7 +1,10 @@
 package com.example.ptts.features.parent_camera.data
 
 import android.util.Log
+import com.example.ptts.features.parent_camera.domain.BodyLandmark
+import com.example.ptts.features.parent_camera.domain.FrameLightMetrics
 import com.example.ptts.features.parent_camera.domain.JumpDiagnostic
+import com.example.ptts.features.parent_camera.domain.PosePoint
 import java.io.File
 
 /**
@@ -104,9 +107,62 @@ class JumpSessionDiagnosticRecorder(
                     .append('\t')
                     .append(event.typicalWorstFrameIntervalMs?.toString() ?: "")
                     .append('\t')
-                    .appendLine(event.adaptivePeakLift?.toString() ?: "")
+                    .append(event.adaptivePeakLift?.toString() ?: "")
+                    .append('\t')
+                    .append(event.sessionStage ?: "")
+                    .append('\t')
+                    .append(event.inputQuality ?: "")
+                    .append('\t')
+                    .append(event.bodySignal ?: "")
+                    .append('\t')
+                    .append(event.footSignal ?: "")
+                    .append('\t')
+                    .append(event.cameraMotion.offsetX.toString())
+                    .append('\t')
+                    .append(event.cameraMotion.offsetY.toString())
+                    .append('\t')
+                    .append(event.cameraMotion.magnitude.toString())
+                    .append('\t')
+                    .append(event.cameraMotion.available.toString())
+                    .append('\t')
+                    .append(event.cameraMotion.reliable.toString())
+                    .append('\t')
+                    .append(serializeLandmarks(event.landmarks))
+                    .append('\t')
+                    .append(event.lightMetrics?.let(::serializeLightMetrics) ?: "")
+                    .append('\t')
+                    .append(event.autoLowLightState?.name ?: "")
+                    .append('\t')
+                    .append(event.autoLowLightLevel?.toString() ?: "")
+                    .append('\t')
+                    .appendLine(event.autoLowLightReason?.replace('\t', ' ') ?: "")
             }
         }
+    }
+
+    private fun serializeLandmarks(landmarks: Map<BodyLandmark, PosePoint>): String {
+        return landmarks.entries
+            .sortedBy { it.key.ordinal }
+            .joinToString(";") { (landmark, point) ->
+                "${landmark.name},${point.x},${point.y},${point.confidence}"
+            }
+    }
+
+    private fun serializeLightMetrics(metrics: FrameLightMetrics): String {
+        return listOf(
+            metrics.timestampMs,
+            metrics.meanLuma,
+            metrics.regionMeanLuma,
+            metrics.darkPixelRatio,
+            metrics.overexposedRatio,
+            metrics.region.name,
+            metrics.regionCenterX,
+            metrics.regionCenterY,
+            metrics.regionWidth,
+            metrics.regionHeight,
+            metrics.regionAgeMs,
+            metrics.sampleCount,
+        ).joinToString(",")
     }
 
     private companion object {

@@ -37,6 +37,73 @@ class PoseCaptureQualityAnalyzerTest {
     }
 
     @Test
+    fun lowConfidencePointsNearEdge_doNotReportEdgeClipped() {
+        val result = PoseCaptureQualityAnalyzer().analyze(
+            frame(centerX = 0.03f, confidence = 0.25f),
+        )
+
+        assertEquals(CaptureQualityIssue.LowLightOrBlur, result.issue)
+    }
+
+    @Test
+    fun missingFeet_reportsPartialBodyInsteadOfLowLight() {
+        val base = frame().landmarks
+        val result = PoseCaptureQualityAnalyzer().analyze(
+            PoseFrame(
+                timestampMs = 0L,
+                landmarks = base - BodyLandmark.LeftAnkle - BodyLandmark.RightAnkle,
+            ),
+        )
+
+        assertEquals(CaptureQualityIssue.PartialBody, result.issue)
+    }
+
+    @Test
+    fun oneUnreliableRequiredPoint_reportsUnreliablePose() {
+        val landmarks = frame().landmarks.toMutableMap()
+        val leftAnkle = landmarks.getValue(BodyLandmark.LeftAnkle)
+        landmarks[BodyLandmark.LeftAnkle] = leftAnkle.copy(confidence = 0.10f)
+
+        val result = PoseCaptureQualityAnalyzer().analyze(
+            PoseFrame(timestampMs = 0L, landmarks = landmarks),
+        )
+
+        assertEquals(CaptureQualityIssue.UnreliablePose, result.issue)
+    }
+
+    @Test
+    fun framingIssue_isDebouncedAcrossObservedFrames() {
+        val analyzer = PoseCaptureQualityAnalyzer()
+        assertEquals(CaptureQualityIssue.Good, analyzer.analyze(frame(timestampMs = 0L)).issue)
+
+        assertEquals(
+            CaptureQualityIssue.Good,
+            analyzer.analyze(frame(timestampMs = 33L, centerY = 0.29f)).issue,
+        )
+        assertEquals(
+            CaptureQualityIssue.Good,
+            analyzer.analyze(frame(timestampMs = 66L, centerY = 0.29f)).issue,
+        )
+        assertEquals(
+            CaptureQualityIssue.EdgeClipped,
+            analyzer.analyze(frame(timestampMs = 99L, centerY = 0.29f)).issue,
+        )
+
+        assertEquals(
+            CaptureQualityIssue.EdgeClipped,
+            analyzer.analyze(frame(timestampMs = 132L)).issue,
+        )
+        assertEquals(
+            CaptureQualityIssue.EdgeClipped,
+            analyzer.analyze(frame(timestampMs = 165L)).issue,
+        )
+        assertEquals(
+            CaptureQualityIssue.Good,
+            analyzer.analyze(frame(timestampMs = 198L)).issue,
+        )
+    }
+
+    @Test
     fun poseNearFrameEdge_reportsEdgeClipped() {
         val result = PoseCaptureQualityAnalyzer().analyze(frame(centerY = 0.29f))
 
@@ -73,6 +140,7 @@ class PoseCaptureQualityAnalyzerTest {
     }
 
     private fun frame(
+        timestampMs: Long = 0L,
         centerX: Float = 0.50f,
         centerY: Float = 0.59f,
         bodyScale: Float = 1f,
@@ -92,7 +160,7 @@ class PoseCaptureQualityAnalyzerTest {
             BodyLandmark.LeftAnkle to point(centerX - 0.04f, scaleY(footY, centerY, bodyScale), confidence),
             BodyLandmark.RightAnkle to point(centerX + 0.04f, scaleY(footY, centerY, bodyScale), confidence),
         )
-        return PoseFrame(timestampMs = 0L, landmarks = scaled)
+        return PoseFrame(timestampMs = timestampMs, landmarks = scaled)
     }
 
     private fun scaleY(
